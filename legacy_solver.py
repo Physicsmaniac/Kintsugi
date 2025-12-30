@@ -186,12 +186,21 @@ def main():
     if n == 0: print("No images found!"); return
 
     print(f"📦 Loaded {n} strips (Mixed Bag).")
-    images_pil = [Image.open(f).convert("RGB") for f in files]
+    # Load original images for final stitching
+    images_pil_original = [Image.open(f).convert("RGB") for f in files]
     images_cv = [cv2.imread(f) for f in files]
+
+    # Create Grayscale versions for Inference (Robustness)
+    images_inference = []
+    for img in images_pil_original:
+        gray = ImageOps.grayscale(img)
+        gray_rgb = gray.convert("RGB")
+        images_inference.append(gray_rgb)
 
     model = load_model()
     score_matrix = np.zeros((n, n))
-    dataset = InferenceDataset(images_pil)
+    # Pass grayscale images to dataset
+    dataset = InferenceDataset(images_inference)
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, num_workers=4)
 
     print("⚡ Computing all-to-all scores...")

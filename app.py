@@ -374,6 +374,15 @@ elif active_tab == "🧩 Solver":
                     n = len(images_pil)
                     score_matrix = np.zeros((n, n))
 
+                    # --- GRAYSCALE CONVERSION FOR ROBUST INFERENCE ---
+                    # We convert to grayscale (then back to 3-channel RGB) for the model
+                    # This prevents the model from being confused by lighting/color artifacts
+                    images_inference = []
+                    for img in images_pil:
+                        gray = ImageOps.grayscale(img)
+                        gray_rgb = gray.convert("RGB")
+                        images_inference.append(gray_rgb)
+
                     # Normalization
                     norm_transform = transforms.Compose([
                         transforms.ToTensor(),
@@ -392,8 +401,9 @@ elif active_tab == "🧩 Solver":
                                 score_matrix[i, j] = -1.0
                                 continue
 
-                            img_a = images_pil[i]
-                            img_b = images_pil[j]
+                            # Use GRAYSCALE versions for scoring
+                            img_a = images_inference[i]
+                            img_b = images_inference[j]
 
                             # PREPROCESSING
                             def resize_to_training_width(img):
