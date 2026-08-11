@@ -1,0 +1,224 @@
+"""Greedy baseline solver for strip ordering.
+
+Given an n×n score matrix where ``score[i, j]`` is the probability that
+strip *j* belongs immediately to the right of strip *i*, this module
+greedily builds chains (pages) by iteratively extending with the
+highest-confidence unvisited neighbour.
+
+Chain scoring heuristic: ``avg_edge_score × √len(chain)``
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+from typing import Sequence
+
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+def _build_chain(
+    start: int,
+    score_matrix: np.ndarray,
+    available: set[int],
+    threshold: float,
+) -> tuple[list[int], float]:
+    """Build a single greedy chain starting from *start*.
+
+    Parameters
+    ----------
+    start : int
+        Index of the starting strip.
+    score_matrix : np.ndarray
+        n×n score matrix.
+    available : set[int]
+        Set of strip indices still available for assignment.
+    threshold : float
+        Minimum confidence to continue extending a chain.
+
+    Returns
+    -------
+    chain : list[int]
+        Ordered list of strip indices forming the chain.
+    chain_score : float
+        Heuristic chain score: ``avg_edge_score × √len(chain)``.
+    """
+    chain = [start]
+    used = {start}
+    edge_scores: list[float] = []
+
+    while True:
+        current = chain[-1]
+        candidates = available - used
+        if not candidates:
+            break
+
+        # Find highest-scoring right-neighbour among candidates
+        best_idx = -1
+        best_score = -1.0
+        for c in candidates:
+            s = float(score_matrix[current, c])
+            if s > best_score:
+                best_score = s
+                best_idx = c
+
+        if best_score < threshold or best_idx < 0:
+            break
+
+        chain.append(best_idx)
+        used.add(best_idx)
+        edge_scores.append(best_score)
+
+    if len(edge_scores) > 0:
+        avg_score = sum(edge_scores) / len(edge_scores)
+    else:
+        avg_score = 0.0
+
+    chain_score = avg_score * math.sqrt(len(chain))
+    return chain, chain_score
+
+
+def solve_greedy(
+    score_matrix: np.ndarray,
+    threshold: float = 0.5,
+    min_chain_length: int = 2,
+) -> list[list[int]]:
+    """Greedy strip-ordering solver.
+
+    Iteratively builds chains by trying every available strip as a start
+    node, greedily extending each, and committing the best-scoring chain
+    as a page.  Remaining unassigned strips are returned as singletons.
+
+    Parameters
+    ----------
+    score_matrix : np.ndarray
+        n×n asymmetric score matrix.  ``score_matrix[i, j]`` is the
+        probability that strip *j* is immediately right of strip *i*.
+    threshold : float
+        Minimum edge confidence to continue extending a chain.
+    min_chain_length : int
+        Chains shorter than this are not committed as pages; their
+        strips are returned as singletons at the end.
+
+    Returns
+    -------
+    pages : list[list[int]]
+        Ordered list of pages, each page being an ordered list of strip
+        indices.  Unassigned strips appear as singleton lists at the end.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> scores = np.array([
+    ...     [0.0, 0.9, 0.1],
+    ...     [0.1, 0.0, 0.8],
+    ...     [0.2, 0.1, 0.0],
+    ... ])
+    >>> solve_greedy(scores, threshold=0.5, min_chain_length=2)
+    [[0, 1, 2]]
+    """
+    n = score_matrix.shape[0]
+    if n == 0:
+        return []
+    if n == 1:
+        return [[0]]
+
+    logger.info(
+        "Greedy solver: n=%d, threshold=%.2f, min_chain_length=%d",
+        n, threshold, min_chain_length,
+    )
+
+    available: set[int] = set(range(n))
+    pages: list[list[int]] = []
+
+    while available:
+        best_chain: list[int] = []
+        best_chain_score: float = -1.0
+
+        # Try every remaining strip as a potential start
+        for start in available:
+            chain, chain_score = _build_chain(
+                start, score_matrix, available, threshold,
+            )
+            if chain_score > best_chain_score:
+                best_chain = chain
+                best_chain_score = chain_score
+
+        # Only commit chains that meet the minimum length
+        if len(best_chain) >= min_chain_length:
+            pages.append(best_chain)
+            for idx in best_chain:
+                available.discard(idx)
+            logger.debug(
+                "  Committed chain of length %d (score=%.3f): %s",
+                len(best_chain), best_chain_score, best_chain,
+            )
+        else:
+            # No viable chain found — break and dump remaining as singletons
+            break
+
+    # Remaining strips become singleton pages
+    for idx in sorted(available):
+        pages.append([idx])
+
+    logger.info(
+        "Greedy solver finished: %d pages (%d multi-strip, %d singletons)",
+        len(pages),
+        sum(1 for p in pages if len(p) > 1),
+        sum(1 for p in pages if len(p) == 1),
+    )
+    return pages
+
+
+def solve_greedy_with_clusters(
+    score_matrix: np.ndarray,
+    clusters: dict[int, list[int]],
+    threshold: float = 0.5,
+) -> dict[int, list[int]]:
+    """Run greedy ordering independently within each pre-assigned cluster.
+
+    This is useful when page clustering has already been performed and
+    we only need to determine strip *ordering* within each page.
+
+    Parameters
+    ----------
+    score_matrix : np.ndarray
+        Full n×n score matrix.
+    clusters : dict[int, list[int]]
+        Mapping from cluster label → list of strip indices.
+    threshold : float
+        Extension threshold for the greedy solver.
+
+    Returns
+    -------
+    ordered_clusters : dict[int, list[int]]
+        Same cluster labels, but strip indices are now ordered.
+    """
+    ordered: dict[int, list[int]] = {}
+
+    for label, indices in clusters.items():
+        if len(indices) <= 1:
+            ordered[label] = list(indices)
+            continue
+
+        # Build a sub-matrix for this cluster
+        idx_map = {original: local for local, original in enumerate(indices)}
+        sub_n = len(indices)
+        sub_matrix = np.zeros((sub_n, sub_n), dtype=score_matrix.dtype)
+        for li, oi in enumerate(indices):
+            for lj, oj in enumerate(indices):
+                sub_matrix[li, lj] = score_matrix[oi, oj]
+
+        # Solve within sub-matrix
+        sub_pages = solve_greedy(sub_matrix, threshold=threshold, min_chain_length=1)
+
+        # Flatten and map back to original indices
+        flat_order = []
+        for page in sub_pages:
+            for local_idx in page:
+                flat_order.append(indices[local_idx])
+        ordered[label] = flat_order
+
+    return ordered

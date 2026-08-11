@@ -2,41 +2,42 @@
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
+dist/
+build/
 *.egg
-MANIFEST
 
-# Virtual Environment
+# Virtual environments
 venv/
 .venv/
 env/
-.env/
 
-# IDEs
+# IDE
 .vscode/
 .idea/
-.DS_Store
+*.swp
+*.swo
+*~
 
-# Project Specific
+# OS
+.DS_Store
+Thumbs.db
+
+# Model checkpoints (large binary files)
+*.pth
+*.pt
+checkpoints/
+
+# Data directory (raw PDFs, images, shredded outputs)
+data/
+person5_test_set/
 shredded_randomized/
 evaluation_results/
-person5_test_set/
-*.pdf
-*.zip
-*.pth
-!best_seam_model_v2.pth
+
+# Metrics outputs (generated)
+Metrics/training_log.csv
+ordering_matrix_*.png
+paper_*.png
+
+# Jupyter
+.ipynb_checkpoints/
