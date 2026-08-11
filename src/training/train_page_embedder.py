@@ -27,6 +27,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Suppress noisy HTTP probe logs from HuggingFace/httpx internals
+for _noisy in ("httpx", "datasets.load", "huggingface_hub"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 
 class MultiPageStripDataset(IterableDataset):
     """Generates training batches for contrastive page embedding learning.
@@ -168,6 +172,7 @@ def validate(model: nn.Module, dataloader: DataLoader, device: torch.device, num
 
 
 def main() -> None:
+    import time
     parser = argparse.ArgumentParser(description="Train PageEmbeddingNet")
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs to train")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
@@ -176,12 +181,13 @@ def main() -> None:
     parser.add_argument("--output-dir", type=str, default="checkpoints", help="Output directory")
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
     parser.add_argument("--train-steps-per-epoch", type=int, default=1000, help="Steps per epoch")
+    parser.add_argument("--log-interval", type=int, default=50, help="Log progress every N steps")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"🚀 Using device: {device}")
+    logger.info(f"🖥️  Using device: {device}")
 
     # Dataset and DataLoader
     batch_size = args.pages_per_batch * args.strips_per_page
@@ -224,16 +230,24 @@ def main() -> None:
     with open(csv_path, mode="a" if file_exists else "w", newline="") as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(["epoch", "train_loss", "val_intra_sim", "val_inter_sim"])
+            writer.writerow(["epoch", "train_loss", "val_intra_sim", "val_inter_sim", "sim_gap"])
 
     logger.info("🔥 Starting training loop...")
     for epoch in range(start_epoch, args.epochs):
+        current_lr = scheduler.get_last_lr()[0]
+        logger.info("════════════════════════════════════════════════════════════════")
+        logger.info(f"🏋️  Embedder Epoch {epoch + 1} / {args.epochs}  [lr: {current_lr:.2e}]")
+        logger.info("════════════════════════════════════════════════════════════════")
+        
         model.train()
         total_loss = 0.0
-        
         train_iter = iter(train_loader)
         
-        for step in range(args.train_steps_per_epoch):
+        epoch_start_time = time.time()
+        step_start_time = time.time()
+        last_log_step = 0
+        
+        for step in range(1, args.train_steps_per_epoch + 1):
             try:
                 images, labels = next(train_iter)
             except StopIteration:
@@ -255,41 +269,58 @@ def main() -> None:
             
             total_loss += loss.item()
             
-            if (step + 1) % 100 == 0:
-                logger.info(f"Epoch [{epoch+1}/{args.epochs}] Step [{step+1}/{args.train_steps_per_epoch}] Loss: {loss.item():.4f}")
+            if step % args.log_interval == 0 or step == args.train_steps_per_epoch:
+                elapsed = time.time() - step_start_time
+                steps_passed = step - last_log_step
+                samples_per_sec = (steps_passed * batch_size) / max(1e-5, elapsed)
+                running_loss = total_loss / step
+                logger.info(
+                    f"   📈 [Embedder Step {step:4d}/{args.train_steps_per_epoch:4d}]  "
+                    f"batch_loss: {loss.item():.4f} | run_loss: {running_loss:.4f} | {samples_per_sec:.1f} samples/sec"
+                )
+                step_start_time = time.time()
+                last_log_step = step
                 
+        train_time = time.time() - epoch_start_time
+        avg_train_loss = total_loss / args.train_steps_per_epoch
         scheduler.step()
         
-        avg_train_loss = total_loss / args.train_steps_per_epoch
-        logger.info(f"📈 Epoch {epoch+1} Average Loss: {avg_train_loss:.4f}")
-        
+        logger.info("🔍 Running validation embeddings assessment...")
+        val_start_time = time.time()
         intra_sim, inter_sim = validate(model, val_loader, device)
-        logger.info(f"📊 Validation - Intra-page Sim: {intra_sim:.4f}, Inter-page Sim: {inter_sim:.4f}")
-        
+        val_time = time.time() - val_start_time
+        sim_gap = intra_sim - inter_sim
+
+        logger.info(f"📊 Embedder Epoch {epoch + 1} Summary (Train: {train_time:.1f}s, Val: {val_time:.1f}s):")
+        logger.info(f"   ├── Avg Train Loss:  {avg_train_loss:.4f}")
+        logger.info(f"   ├── Intra-page Sim:  {intra_sim:.4f} (Higher is better)")
+        logger.info(f"   ├── Inter-page Sim:  {inter_sim:.4f} (Lower is better)")
+        logger.info(f"   └── Separation Gap:  {sim_gap:+.4f}")
+
         with open(csv_path, mode="a", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([epoch + 1, avg_train_loss, intra_sim, inter_sim])
+            writer.writerow([epoch + 1, avg_train_loss, intra_sim, inter_sim, sim_gap])
             
-        # Save best model
-        if avg_train_loss < best_loss:
-            best_loss = avg_train_loss
-            torch.save({
-                "epoch": epoch + 1,
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "scheduler": scheduler.state_dict(),
-                "best_loss": best_loss,
-            }, Path(args.output_dir) / "best_model.pth")
-            logger.info("💾 Saved new best model!")
-            
-        # Save latest model
-        torch.save({
+        ckpt_payload = {
             "epoch": epoch + 1,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "best_loss": best_loss,
-        }, Path(args.output_dir) / "latest_model.pth")
+        }
+
+        # Save latest model
+        latest_path = Path(args.output_dir) / "latest_checkpoint.pth"
+        torch.save(ckpt_payload, latest_path)
+        logger.info(f"💾 Saved latest checkpoint → {latest_path}")
+
+        # Save best model by loss
+        if avg_train_loss < best_loss:
+            best_loss = avg_train_loss
+            ckpt_payload["best_loss"] = best_loss
+            best_path = Path(args.output_dir) / "best_page_embedder.pth"
+            torch.save(ckpt_payload, best_path)
+            logger.info(f"🏆 New best loss ({best_loss:.4f})! Saved model → {best_path}")
 
 if __name__ == "__main__":
     main()

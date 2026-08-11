@@ -36,6 +36,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Suppress noisy HTTP probe logs from HuggingFace/httpx internals
+for _noisy in ("httpx", "datasets.load", "huggingface_hub"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 
 # -----------------------------------------------------------------------
 # CLI
@@ -91,6 +95,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=8,
         help="DataLoader worker count (default: 8).",
+    )
+    parser.add_argument(
+        "--log-interval",
+        type=int,
+        default=50,
+        help="Step interval for progress logging (default: 50).",
     )
     return parser.parse_args()
 
@@ -208,13 +218,27 @@ def train(args: argparse.Namespace) -> None:
         "recall",
         "f1",
     ]
-    with open(csv_path, "w", newline="") as f:
-        csv.writer(f).writerow(csv_fields)
+    file_exists = csv_path.exists()
+    with open(csv_path, mode="a" if file_exists else "w", newline="") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(csv_fields)
     logger.info("📝 CSV log: %s", csv_path)
 
     # ---- epoch loop ---------------------------------------------------
+    import time
+
     for epoch in range(start_epoch, args.epochs):
-        logger.info("🏋️  Epoch %d / %d", epoch + 1, args.epochs)
+        current_lr = scheduler.get_last_lr()[0]
+        logger.info(
+            "════════════════════════════════════════════════════════════════"
+        )
+        logger.info(
+            "🏋️  Epoch %d / %d  [lr: %.2e]", epoch + 1, args.epochs, current_lr
+        )
+        logger.info(
+            "════════════════════════════════════════════════════════════════"
+        )
 
         # ---- train phase ----------------------------------------------
         model.train()
@@ -222,6 +246,9 @@ def train(args: argparse.Namespace) -> None:
         train_correct: int = 0
         train_total: int = 0
         train_iter = iter(train_loader)
+        epoch_start_time = time.time()
+        step_start_time = time.time()
+        last_log_step = 0
 
         for step in range(1, args.steps_per_epoch + 1):
             try:
@@ -249,21 +276,33 @@ def train(args: argparse.Namespace) -> None:
             train_correct += (preds == labels).sum().item()
             train_total += batch_size
 
-            if step % 500 == 0:
+            if step % args.log_interval == 0 or step == args.steps_per_epoch:
+                elapsed = time.time() - step_start_time
+                steps_passed = step - last_log_step
+                samples_per_sec = (steps_passed * batch_size) / max(1e-5, elapsed)
                 running_acc = train_correct / max(1, train_total)
                 running_loss = train_loss_sum / max(1, train_total)
+                batch_loss = loss.item()
+                
                 logger.info(
-                    "   📈 Step %d/%d – loss: %.4f  acc: %.4f",
+                    "   📈 [Train Step %4d/%4d]  batch_loss: %.4f | run_loss: %.4f | run_acc: %.4f (%.2f%%) | %.1f samples/sec",
                     step,
                     args.steps_per_epoch,
+                    batch_loss,
                     running_loss,
                     running_acc,
+                    running_acc * 100.0,
+                    samples_per_sec,
                 )
+                step_start_time = time.time()
+                last_log_step = step
 
         train_loss = train_loss_sum / max(1, train_total)
         train_acc = train_correct / max(1, train_total)
+        train_time = time.time() - epoch_start_time
 
         # ---- validation phase -----------------------------------------
+        logger.info("🔍 Running validation...")
         model.eval()
         val_loss_sum: float = 0.0
         val_correct: int = 0
@@ -271,6 +310,7 @@ def train(args: argparse.Namespace) -> None:
         all_preds: list[int] = []
         all_labels: list[int] = []
         val_iter = iter(val_loader)
+        val_start_time = time.time()
 
         with torch.no_grad():
             for step in range(1, args.val_steps + 1):
@@ -296,8 +336,21 @@ def train(args: argparse.Namespace) -> None:
                 all_preds.extend(preds.cpu().int().tolist())
                 all_labels.extend(labels.cpu().int().tolist())
 
+                if step % args.log_interval == 0 or step == args.val_steps:
+                    v_acc = val_correct / max(1, val_total)
+                    v_loss = val_loss_sum / max(1, val_total)
+                    logger.info(
+                        "   🔍 [Val Step   %4d/%4d]  val_loss: %.4f | val_acc: %.4f (%.2f%%)",
+                        step,
+                        args.val_steps,
+                        v_loss,
+                        v_acc,
+                        v_acc * 100.0,
+                    )
+
         val_loss = val_loss_sum / max(1, val_total)
         val_acc = val_correct / max(1, val_total)
+        val_time = time.time() - val_start_time
 
         # sklearn metrics
         precision = precision_score(all_labels, all_preds, zero_division=0)
@@ -305,13 +358,23 @@ def train(args: argparse.Namespace) -> None:
         f1 = f1_score(all_labels, all_preds, zero_division=0)
 
         logger.info(
-            "📊 Epoch %d results – train_loss: %.4f | train_acc: %.4f | "
-            "val_loss: %.4f | val_acc: %.4f | P: %.4f | R: %.4f | F1: %.4f",
+            "📊 Epoch %d Summary (Train: %.1fs, Val: %.1fs):",
             epoch + 1,
+            train_time,
+            val_time,
+        )
+        logger.info(
+            "   ├── Train Loss: %.4f | Train Acc: %.2f%%",
             train_loss,
-            train_acc,
+            train_acc * 100.0,
+        )
+        logger.info(
+            "   ├── Val Loss:   %.4f | Val Acc:   %.2f%%",
             val_loss,
-            val_acc,
+            val_acc * 100.0,
+        )
+        logger.info(
+            "   └── Precision:  %.4f | Recall: %.4f | F1-Score: %.4f",
             precision,
             recall,
             f1,
@@ -348,16 +411,20 @@ def train(args: argparse.Namespace) -> None:
         }
 
         # Always save latest
-        latest_path = output_dir / "latest_checkpoint.pt"
+        latest_path = output_dir / "latest_checkpoint.pth"
         torch.save(ckpt_payload, latest_path)
         logger.info("💾 Saved latest checkpoint → %s", latest_path)
 
         # Save best by val accuracy
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            best_path = output_dir / "best_model.pt"
+            best_path = output_dir / "best_seam_model.pth"
             torch.save(ckpt_payload, best_path)
-            logger.info("🏆 New best model (val_acc=%.4f) → %s", val_acc, best_path)
+            logger.info(
+                "🏆 New best validation accuracy (%.2f%%)! Saved model → %s",
+                val_acc * 100.0,
+                best_path,
+            )
 
     logger.info("✅ Training complete. Best val_acc: %.4f", best_val_acc)
 

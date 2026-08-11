@@ -21,10 +21,14 @@ import numpy as np
 import torch
 from datasets import load_dataset  # type: ignore[import-untyped]
 from PIL import Image
-from torch.utils.data import IterableDataset
+from torch.utils.data import IterableDataset, get_worker_info
 from torchvision import transforms
 
 logger = logging.getLogger(__name__)
+
+# Suppress noisy HTTP probe logs from HuggingFace internals
+for _noisy_logger in ("httpx", "datasets.load", "huggingface_hub"):
+    logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -307,22 +311,33 @@ class StreamingShredDataset(IterableDataset):
 
     def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
         """Yield ``(image_tensor, label_tensor)`` pairs indefinitely."""
+        stream_rng = random.Random()
         buffer: list[np.ndarray] = []
-        warmup_target = max(1, int(self.buffer_size * 0.10))
+        warmup_target = min(50, max(1, int(self.buffer_size * 0.05)))
+
+        # Determine worker info for shard splitting
+        worker_info = get_worker_info()
+        worker_id = worker_info.id if worker_info else 0
+        num_workers = worker_info.num_workers if worker_info else 1
 
         logger.info(
-            "🚀 Starting StreamingShredDataset (split=%s, buffer=%d, warmup=%d)",
+            "🚀 Starting StreamingShredDataset (split=%s, buffer=%d, warmup=%d, worker=%d/%d)",
             self.split,
             self.buffer_size,
             warmup_target,
+            worker_id,
+            num_workers,
         )
 
         ds = load_dataset(
             self.dataset_path,
             split=self.split,
             streaming=True,
-            trust_remote_code=True,
         )
+
+        # Shard the stream across workers so each downloads a distinct slice
+        if num_workers > 1:
+            ds = ds.shard(num_shards=num_workers, index=worker_id)
 
         for sample in ds:
             # ---- extract & preprocess image ---------------------------
