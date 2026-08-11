@@ -261,7 +261,7 @@ def main() -> None:
             
             with torch.amp.autocast(device.type):
                 embeddings = model(images)
-                loss = criterion(embeddings.unsqueeze(1), labels)
+                loss = criterion(embeddings, labels)
                 
             scaler.scale(loss).backward()
             scaler.step(optimizer)

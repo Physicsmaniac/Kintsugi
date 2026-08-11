@@ -83,11 +83,11 @@ class SupConLoss(nn.Module):
         batch_size = embeddings.shape[0]
 
         # Pairwise cosine similarity (embeddings are already L2-normalized)
-        similarity = torch.matmul(embeddings, embeddings.T) / self.temperature
+        similarity = torch.matmul(embeddings, embeddings.t()) / self.temperature
 
         # Mask: 1 where labels match, 0 otherwise
         labels = labels.unsqueeze(1)
-        mask = torch.eq(labels, labels.T).float().to(device)
+        mask = torch.eq(labels, labels.t()).float().to(device)
 
         # Remove self-similarity from both mask and logits
         self_mask = torch.eye(batch_size, dtype=torch.bool, device=device)
