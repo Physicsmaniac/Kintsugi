@@ -40,14 +40,14 @@ def run_experiment(
     seam_model: torch.nn.Module,
     page_model: torch.nn.Module | None,
     device: torch.device
-) -> dict[str, Any]:
+):
     """Run a single benchmark experiment."""
     logger.info(f"Running experiment: pages={num_pages}, strips={num_strips}, strategy={strategy}")
     
     shred_dir = Path(output_dir) / f"shredded_{num_pages}p_{num_strips}s"
     shred_dir.mkdir(parents=True, exist_ok=True)
     
-    # Shred PDF
+    # Shred PDF -> returns dict: { "strip_0000.jpg": {"page": 0, "index": 3}, ... }
     strips_info = shred_pdf(
         pdf_path=pdf_path,
         output_dir=str(shred_dir),
@@ -59,27 +59,37 @@ def run_experiment(
     
     if not strips_info:
         logger.warning("No strips generated. Returning empty results.")
-        return {}
+        from src.evaluation.metrics import ReconstructionMetrics
+        return ReconstructionMetrics()
         
     # Load and preprocess strips
     images = []
-    true_page_labels = []
-    for info in strips_info:
-        img_path = info["path"]
-        page_idx = info["page_idx"]
+    true_page_labels_dict = {}
+    true_pages_map = defaultdict(list)
+    
+    for strip_idx, (fname, meta) in enumerate(strips_info.items()):
+        img_path = shred_dir / fname
+        page_idx = meta["page"]
+        orig_idx = meta["index"]
+        
         img = Image.open(img_path).convert("RGB")
         images.append(img)
-        true_page_labels.append(page_idx)
+        true_page_labels_dict[strip_idx] = page_idx
+        true_pages_map[page_idx].append((orig_idx, strip_idx))
         
-    true_pages = defaultdict(list)
-    for idx, page_lbl in enumerate(true_page_labels):
-        true_pages[page_lbl].append(idx)
-    true_pages_list = list(true_pages.values())
+    # Build true_pages dict mapping page_idx -> list of strip_indices in correct left-to-right order
+    true_pages = {}
+    for page_idx, strip_list in true_pages_map.items():
+        strip_list.sort(key=lambda x: x[0])
+        true_pages[page_idx] = [s_idx for _, s_idx in strip_list]
+        
+    true_label_array = np.array([true_page_labels_dict[i] for i in range(len(images))])
         
     # Compute score matrix
-    score_matrix = compute_score_matrix(seam_model, device, images)
+    score_matrix, _ = compute_score_matrix(seam_model, device, images)
     
     pred_pages = []
+    pred_page_labels = np.full(len(images), -1, dtype=int)
     
     if "hdbscan" in strategy:
         if page_model is None:
@@ -93,37 +103,46 @@ def run_experiment(
                 emb = page_model(tensor)
                 embeddings.append(emb.squeeze(0).cpu().numpy())
                 
-        clusters = cluster_strips_by_page(embeddings, min_cluster_size=num_strips // 2)
+        embeddings_arr = np.array(embeddings)
+        clusters = cluster_strips_by_page(embeddings_arr, min_cluster_size=max(2, num_strips // 2))
         clusters = detect_and_split_merged_clusters(clusters, score_matrix)
         
         for cluster_id, strip_indices in clusters.items():
             if len(strip_indices) == 0:
                 continue
                 
-            # Extract submatrix
-            sub_matrix = score_matrix[strip_indices][:, strip_indices]
+            for idx in strip_indices:
+                pred_page_labels[idx] = cluster_id
+                
+            sub_matrix = score_matrix[np.ix_(strip_indices, strip_indices)]
             
             if "greedy" in strategy:
-                order = solve_greedy(sub_matrix, threshold=0.5)
+                chains = solve_greedy(sub_matrix, threshold=0.5)
+                for chain in chains:
+                    pred_pages.append([strip_indices[i] for i in chain])
             elif "atsp" in strategy:
                 order = solve_atsp(sub_matrix, temperature=1.0)
+                pred_pages.append([strip_indices[i] for i in order])
             else:
                 raise ValueError(f"Unknown solver in strategy {strategy}")
-                
-            pred_pages.append([strip_indices[i] for i in order])
     else:
-        # Global solver
+        # Global solver without clustering
         if "greedy" in strategy:
-            # Assuming greedy can return multiple lists or we just do it globally
-            global_order = solve_greedy(score_matrix, threshold=0.5)
-            pred_pages = [global_order]
+            chains = solve_greedy(score_matrix, threshold=0.5)
+            pred_pages = chains
         elif "atsp" in strategy:
             global_order = solve_atsp(score_matrix, temperature=1.0)
             pred_pages = [global_order]
         else:
             raise ValueError(f"Unknown strategy {strategy}")
             
-    metrics = evaluate_reconstruction(pred_pages, true_pages_list, true_page_labels)
+    metrics = evaluate_reconstruction(
+        pred_pages=pred_pages,
+        true_pages=true_pages,
+        true_page_labels=true_page_labels_dict,
+        pred_page_labels=pred_page_labels if "hdbscan" in strategy else None,
+        true_label_array=true_label_array if "hdbscan" in strategy else None,
+    )
     
     return metrics
 
@@ -144,13 +163,14 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
     
-    seam_model = load_seam_model(args.seam_model, device)
+    seam_model, _ = load_seam_model(args.seam_model, device)
     
     page_model = None
     if args.page_model and any("hdbscan" in s for s in args.strategies):
-        page_model = load_page_embedder(args.page_model, device)
+        page_model, _ = load_page_embedder(args.page_model, device)
         
     results = []
+    import numpy as np
     
     csv_path = Path(args.output_dir) / "benchmark_results.csv"
     with open(csv_path, mode="w", newline="") as f:
@@ -160,8 +180,8 @@ def main() -> None:
         for p, s, strat in itertools.product(args.num_pages, args.num_strips, args.strategies):
             metrics = run_experiment(args.pdf, args.output_dir, p, s, strat, seam_model, page_model, device)
             
-            ari = metrics.get("ari", 0.0)
-            p_acc = metrics.get("pairwise_accuracy", 0.0)
+            ari = getattr(metrics.clustering, "adjusted_rand_index", 0.0)
+            p_acc = getattr(metrics.ordering, "pairwise_accuracy", 0.0)
             
             writer.writerow([p, s, strat, ari, p_acc])
             results.append({
