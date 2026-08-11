@@ -104,7 +104,7 @@ def _train_transforms() -> transforms.Compose:
     """Build training augmentation pipeline."""
     return transforms.Compose(
         [
-            transforms.RandomCrop(224),
+            transforms.RandomCrop(224, pad_if_needed=True, fill=255),
             transforms.RandomGrayscale(p=0.2),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
@@ -116,7 +116,7 @@ def _val_transforms() -> transforms.Compose:
     """Build validation transform pipeline (deterministic)."""
     return transforms.Compose(
         [
-            transforms.RandomCrop(224),
+            transforms.RandomCrop(224, pad_if_needed=True, fill=255),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ]
