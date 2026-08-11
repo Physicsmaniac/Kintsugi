@@ -62,13 +62,10 @@ echo ""
 
 # --- Create venv ---
 if [ -d ".venv" ]; then
-    echo -e "${YELLOW}⚠️  .venv already exists. Delete it? [y/N]${NC}"
-    read -r answer
-    if [[ "$answer" =~ ^[Yy]$ ]]; then
-        rm -rf .venv
-    else
-        echo "Keeping existing .venv. Skipping venv creation."
-    fi
+    echo -e "${YELLOW}⚠️  Existing .venv directory found. Reusing .venv...${NC}"
+else
+    echo -e "${CYAN}📦 Creating virtual environment (.venv)...${NC}"
+    $PYTHON -m venv .venv
 fi
 
 if [ ! -d ".venv" ]; then
