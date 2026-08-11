@@ -88,14 +88,22 @@ class MultiPageStripDataset(IterableDataset):
         return strips
 
     def __iter__(self) -> Iterator[Tuple[torch.Tensor, int]]:
+        import torch.utils.data
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            dataset_stream = self.dataset.shard(num_shards=worker_info.num_workers, index=worker_info.id)
+        else:
+            dataset_stream = self.dataset
+
         buffer: list[Image.Image] = []
         page_label_counter = 0
         
-        for item in self.dataset:
+        for item in dataset_stream:
             img = item["image"]
             buffer.append(img)
             
-            if len(buffer) >= self.buffer_size:
+            # Warm up: only wait for 20 pages instead of full 500 to start yielding quickly
+            if len(buffer) >= min(20, self.buffer_size):
                 # Process a batch
                 sampled_pages = random.sample(buffer, self.pages_per_batch)
                 
