@@ -197,7 +197,7 @@ def main() -> None:
         strips_per_page=args.strips_per_page
     )
     val_dataset = MultiPageStripDataset(
-        split="validation", 
+        split="val", 
         pages_per_batch=args.pages_per_batch, 
         strips_per_page=args.strips_per_page
     )
