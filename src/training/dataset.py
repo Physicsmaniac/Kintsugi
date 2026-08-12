@@ -164,14 +164,6 @@ class StreamingShredDataset(IterableDataset):
             self.cross_doc_ratio,
         )
 
-        self.dataset = load_dataset(
-            self.dataset_path,
-            split=self.split,
-            streaming=self.streaming,
-        )
-        if not self.streaming:
-            self.dataset = self.dataset.to_iterable_dataset()
-
     # ------------------------------------------------------------------
     # Strip extraction helpers
     # ------------------------------------------------------------------
@@ -339,7 +331,14 @@ class StreamingShredDataset(IterableDataset):
             num_workers,
         )
 
-        ds = self.dataset
+        ds = load_dataset(
+            self.dataset_path,
+            split=self.split,
+            streaming=self.streaming,
+        )
+
+        if not self.streaming:
+            ds = ds.to_iterable_dataset()
 
         # Shard the stream across workers so each downloads a distinct slice
         if num_workers > 1:

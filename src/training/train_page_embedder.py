@@ -65,10 +65,6 @@ class MultiPageStripDataset(IterableDataset):
         self.max_image_width = max(64, max_image_width)
         self.dataset_path = dataset_path
         self.streaming = streaming
-        
-        self.dataset = load_dataset(dataset_path, split=split, streaming=self.streaming)
-        if not self.streaming:
-            self.dataset = self.dataset.to_iterable_dataset()
 
     def _process_image(self, img: Image.Image) -> list[Image.Image]:
         if img.mode != "RGB":
@@ -101,7 +97,10 @@ class MultiPageStripDataset(IterableDataset):
         # Phase 1: Fill the buffer with an initial batch of images.
         # We use a retry loop so a single timeout doesn't kill the whole run.
         logger.info("🚀 Filling initial buffer for embedder dataset (split=%s)...", self.split)
-        stream_iter = iter(self.dataset)
+        dataset = load_dataset(self.dataset_path, split=self.split, streaming=self.streaming)
+        if not self.streaming:
+            dataset = dataset.to_iterable_dataset()
+        stream_iter = iter(dataset)
         fill_target = min(50, self.buffer_size)
         retries = 0
         max_retries = 10
@@ -189,7 +188,7 @@ class MultiPageStripDataset(IterableDataset):
                 except StopIteration:
                     # Stream exhausted, restart it
                     try:
-                        stream_iter = iter(self.dataset)
+                        stream_iter = iter(dataset)
                     except Exception:
                         pass
                 except Exception:

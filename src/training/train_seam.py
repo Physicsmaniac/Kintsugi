@@ -187,16 +187,20 @@ def train(args: argparse.Namespace) -> None:
         split="test", transform=_val_transforms(), streaming=not args.local
     )
 
+    # HuggingFace streaming datasets cannot be forked safely in multiprocess DataLoader
+    # due to internal file locks, so we force num_workers=0 when streaming.
+    actual_num_workers = args.num_workers if args.local else 0
+
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
-        num_workers=args.num_workers,
+        num_workers=actual_num_workers,
         pin_memory=True,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=args.batch_size,
-        num_workers=args.num_workers,
+        num_workers=actual_num_workers,
         pin_memory=True,
     )
 
