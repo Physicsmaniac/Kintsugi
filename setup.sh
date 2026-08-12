@@ -87,6 +87,19 @@ if [ "$USE_GPU" = true ]; then
         MAJOR=$(echo $CUDA_VER | cut -d. -f1)
         MINOR=$(echo $CUDA_VER | cut -d. -f2)
         
+        # --- GPU Architecture Check ---
+        GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)
+        if [[ "$GPU_NAME" == *"5090"* ]] || [[ "$GPU_NAME" == *"5080"* ]] || [[ "$GPU_NAME" == *"5070"* ]] || [[ "$GPU_NAME" == *"5060"* ]]; then
+            if [ "$MAJOR" -lt 12 ] || ( [ "$MAJOR" -eq 12 ] && [ "$MINOR" -lt 4 ] ); then
+                echo -e "${RED}❌ FATAL HOST MISCONFIGURATION DETECTED ❌${NC}"
+                echo -e "${YELLOW}You have an ${CYAN}$GPU_NAME${YELLOW}, which requires PyTorch compiled for CUDA 12.4+ (Compute Capability 10.x).${NC}"
+                echo -e "${YELLOW}However, your Vast.ai host is running a legacy NVIDIA driver (CUDA API $CUDA_VER).${NC}"
+                echo -e "${RED}PyTorch will fail with 'no kernel image is available' on this machine.${NC}"
+                echo -e "${RED}Please destroy this instance and rent one with NVIDIA Driver 550.xx or higher!${NC}"
+                exit 1
+            fi
+        fi
+        
         if [ "$MAJOR" -lt 12 ] || ( [ "$MAJOR" -eq 12 ] && [ "$MINOR" -lt 1 ] ); then
             echo -e "${YELLOW}⚠️  Driver supports < CUDA 12.1. Installing PyTorch cu118 fallback...${NC}"
             pip install --quiet torch torchvision --index-url https://download.pytorch.org/whl/cu118
