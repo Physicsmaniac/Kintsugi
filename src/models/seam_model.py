@@ -81,9 +81,15 @@ def load_seam_model(
 
     try:
         checkpoint = torch.load(model_path, map_location="cpu", weights_only=True)
+        
+        if "model_state_dict" in checkpoint:
+            state_dict_raw = checkpoint["model_state_dict"]
+        else:
+            state_dict_raw = checkpoint
+            
         # Handle DataParallel state dicts
         state_dict = {
-            k.replace("module.", ""): v for k, v in checkpoint.items()
+            k.replace("module.", ""): v for k, v in state_dict_raw.items()
         }
         model.load_state_dict(state_dict)
         model.to(device).eval()

@@ -41,6 +41,10 @@ EMB_PAGES_PER_BATCH ?= 8
 EMB_STRIPS_PER_PAGE ?= 4
 EMB_STEPS_PER_EPOCH ?= 1000
 
+# Dataset defaults
+LOCAL ?= 0
+LOCAL_FLAG = $(if $(filter 1,$(LOCAL)),--local,)
+
 # Benchmark defaults
 PDF ?= $(DATA_DIR)/206-10001-10017.pdf
 NUM_PAGES ?= 2 5 10
@@ -107,8 +111,9 @@ $(SEAM_DIR):
 $(EMBEDDER_DIR):
 	@mkdir -p $(EMBEDDER_DIR)
 
-train-seam: $(SEAM_DIR) ## Train the seam compatibility model
-	@echo "🔥 Training SeamResNet ($(EPOCHS) epochs, batch=$(BATCH_SIZE), lr=$(LR))..."
+train-seam: ## Train the seam compatibility model from scratch
+	@echo "🚀 Training SeamResNet from scratch..."
+	@mkdir -p $(SEAM_DIR)
 	$(PYTHON) -m src.training.train_seam \
 		--batch-size $(BATCH_SIZE) \
 		--epochs $(EPOCHS) \
@@ -116,7 +121,8 @@ train-seam: $(SEAM_DIR) ## Train the seam compatibility model
 		--val-steps $(VAL_STEPS) \
 		--lr $(LR) \
 		--num-workers $(NUM_WORKERS) \
-		--output-dir $(SEAM_DIR)
+		--output-dir $(SEAM_DIR) \
+		$(LOCAL_FLAG)
 
 train-seam-resume: $(SEAM_DIR) ## Resume seam model training from latest checkpoint
 	@echo "🔄 Resuming SeamResNet training..."
@@ -128,7 +134,8 @@ train-seam-resume: $(SEAM_DIR) ## Resume seam model training from latest checkpo
 		--lr $(LR) \
 		--num-workers $(NUM_WORKERS) \
 		--output-dir $(SEAM_DIR) \
-		--resume $(SEAM_DIR)/latest_checkpoint.pth
+		--resume $(SEAM_DIR)/latest_checkpoint.pth \
+		$(LOCAL_FLAG)
 
 train-embedder: $(EMBEDDER_DIR) ## Train the page embedding model
 	@echo "🔥 Training PageEmbeddingNet ($(EMB_EPOCHS) epochs)..."
@@ -138,7 +145,8 @@ train-embedder: $(EMBEDDER_DIR) ## Train the page embedding model
 		--pages-per-batch $(EMB_PAGES_PER_BATCH) \
 		--strips-per-page $(EMB_STRIPS_PER_PAGE) \
 		--train-steps-per-epoch $(EMB_STEPS_PER_EPOCH) \
-		--output-dir $(EMBEDDER_DIR)
+		--output-dir $(EMBEDDER_DIR) \
+		$(LOCAL_FLAG)
 
 train-all: train-seam train-embedder ## Train both models sequentially
 	@echo "✅ Both models trained."
@@ -166,7 +174,7 @@ benchmark: ## Run the full benchmark suite (set PDF=path/to/file.pdf)
 	@echo "📊 Running benchmark on $(PDF)..."
 	@mkdir -p $(BENCHMARK_DIR)
 	PYTHONPATH=. $(PYTHON) scripts/benchmark.py \
-		--pdf $(PDF) \
+		--pdf "$(PDF)" \
 		--seam-model $(SEAM_MODEL) \
 		$(if $(wildcard $(PAGE_MODEL)),--page-model $(PAGE_MODEL),) \
 		--num-pages $(NUM_PAGES) \

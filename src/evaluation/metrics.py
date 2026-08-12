@@ -259,6 +259,14 @@ def evaluate_reconstruction(
     """
     metrics = ReconstructionMetrics()
 
+    # If no clustering was used (e.g. global greedy), implicitly treat each chain as a cluster
+    if pred_page_labels is None and true_label_array is not None:
+        n_strips = len(true_label_array)
+        pred_page_labels = np.full(n_strips, -1, dtype=int)
+        for cluster_id, page in enumerate(pred_pages):
+            for idx in page:
+                pred_page_labels[idx] = cluster_id
+
     # --- Clustering Metrics ---
     if pred_page_labels is not None and true_label_array is not None:
         metrics.clustering = compute_clustering_metrics(
@@ -272,8 +280,23 @@ def evaluate_reconstruction(
     metrics.clustering.num_true_pages = len(true_pages)
 
     # --- Ordering Metrics ---
-    # Match predicted pages to true pages (best overlap)
-    pairwise_accs = []
+    
+    # 1. Global Pairwise Accuracy
+    true_pairs = set()
+    for true_order in true_pages.values():
+        for k in range(len(true_order) - 1):
+            true_pairs.add((true_order[k], true_order[k + 1]))
+
+    correct_pairs = 0
+    for pred_page in pred_pages:
+        for k in range(len(pred_page) - 1):
+            if (pred_page[k], pred_page[k + 1]) in true_pairs:
+                correct_pairs += 1
+
+    total_true_pairs = len(true_pairs)
+    metrics.ordering.pairwise_accuracy = correct_pairs / total_true_pairs if total_true_pairs > 0 else 0.0
+
+    # 2. Local metrics (Kendall's Tau, Mean Displacement) on non-trivial chains
     kendall_taus = []
     displacements = []
     perfect_pages = 0
@@ -295,11 +318,9 @@ def evaluate_reconstruction(
             continue
 
         # Compute ordering metrics against the best match
-        pa = compute_pairwise_accuracy(best_true_page, pred_page)
         kt = compute_kendall_tau(best_true_page, pred_page)
         md = compute_mean_displacement(best_true_page, pred_page)
 
-        pairwise_accs.append(pa)
         kendall_taus.append(kt)
         displacements.append(md)
 
@@ -307,12 +328,12 @@ def evaluate_reconstruction(
         if set(pred_page) == set(best_true_page) and pred_page == best_true_page:
             perfect_pages += 1
 
-    if pairwise_accs:
-        metrics.ordering.pairwise_accuracy = float(np.mean(pairwise_accs))
+    if kendall_taus:
         metrics.ordering.mean_kendall_tau = float(np.mean(kendall_taus))
         metrics.ordering.mean_displacement = float(np.mean(displacements))
-        metrics.ordering.perfect_page_rate = (
-            perfect_pages / len(true_pages) if true_pages else 0.0
-        )
+        
+    metrics.ordering.perfect_page_rate = (
+        perfect_pages / len(true_pages) if true_pages else 0.0
+    )
 
     return metrics

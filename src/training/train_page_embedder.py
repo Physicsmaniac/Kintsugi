@@ -54,17 +54,21 @@ class MultiPageStripDataset(IterableDataset):
         num_strips_to_shred: int = 15,
         max_image_width: int = 400,
         dataset_path: str = "chainyo/rvl-cdip",
+        streaming: bool = True,
     ):
         super().__init__()
         self.split = split
         self.pages_per_batch = pages_per_batch
         self.strips_per_page = strips_per_page
-        self.buffer_size = buffer_size
+        self.buffer_size = max(pages_per_batch * 2, buffer_size)
         self.num_strips_to_shred = num_strips_to_shred
-        self.max_image_width = max_image_width
+        self.max_image_width = max(64, max_image_width)
         self.dataset_path = dataset_path
+        self.streaming = streaming
         
-        self.dataset = load_dataset(dataset_path, split=split, streaming=True)
+        self.dataset = load_dataset(dataset_path, split=split, streaming=self.streaming)
+        if not self.streaming:
+            self.dataset = self.dataset.to_iterable_dataset()
 
     def _process_image(self, img: Image.Image) -> list[Image.Image]:
         if img.mode != "RGB":
@@ -88,59 +92,109 @@ class MultiPageStripDataset(IterableDataset):
         return strips
 
     def __iter__(self) -> Iterator[Tuple[torch.Tensor, int]]:
-        import torch.utils.data
-        worker_info = torch.utils.data.get_worker_info()
-        if worker_info is not None:
-            dataset_stream = self.dataset.shard(num_shards=worker_info.num_workers, index=worker_info.id)
-        else:
-            dataset_stream = self.dataset
+        import torchvision.transforms.functional as TF
+        import time
 
         buffer: list[Image.Image] = []
         page_label_counter = 0
-        
-        for item in dataset_stream:
-            img = item["image"]
-            buffer.append(img)
-            
-            # Warm up: only wait for 20 pages instead of full 500 to start yielding quickly
-            if len(buffer) >= min(20, self.buffer_size):
-                # Process a batch
-                sampled_pages = random.sample(buffer, self.pages_per_batch)
-                
-                for page_img in sampled_pages:
-                    all_strips = self._process_image(page_img)
-                    
-                    if len(all_strips) < self.strips_per_page:
-                        continue
-                        
-                    sampled_strips = random.sample(all_strips, self.strips_per_page)
-                    
-                    for strip in sampled_strips:
-                        # Resize to 32px width, pad to 224x224, normalize
-                        strip = strip.resize((32, strip.height * 32 // strip.width), Image.Resampling.LANCZOS)
-                        # Pad to 224x224
-                        pad_w = max(0, 224 - strip.width)
-                        pad_h = max(0, 224 - strip.height)
-                        pad_left = pad_w // 2
-                        pad_right = pad_w - pad_left
-                        pad_top = pad_h // 2
-                        pad_bottom = pad_h - pad_top
-                        
-                        padded_strip = ImageOps.expand(strip, border=(pad_left, pad_top, pad_right, pad_bottom), fill="white")
-                        if padded_strip.size != (224, 224):
-                            padded_strip = padded_strip.resize((224, 224))
-                            
-                        # Convert to tensor and normalize (mock normalization)
-                        import torchvision.transforms.functional as TF
-                        tensor = TF.to_tensor(padded_strip)
-                        tensor = TF.normalize(tensor, mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-                        
-                        yield tensor, page_label_counter
-                    
-                    page_label_counter += 1
-                
-                # Remove some images from buffer to allow new ones
-                buffer = buffer[self.pages_per_batch:]
+
+        # Phase 1: Fill the buffer with an initial batch of images.
+        # We use a retry loop so a single timeout doesn't kill the whole run.
+        logger.info("🚀 Filling initial buffer for embedder dataset (split=%s)...", self.split)
+        stream_iter = iter(self.dataset)
+        fill_target = min(50, self.buffer_size)
+        retries = 0
+        max_retries = 10
+        while len(buffer) < fill_target and retries < max_retries:
+            try:
+                item = next(stream_iter)
+                img = item["image"]
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                buffer.append(img)
+                retries = 0  # reset on success
+            except StopIteration:
+                break
+            except Exception as e:
+                retries += 1
+                wait = min(2 ** retries, 30)
+                logger.warning("⚠️  Buffer fill error (retry %d/%d, waiting %ds): %s", retries, max_retries, wait, e)
+                time.sleep(wait)
+                # Recreate the stream iterator to recover from broken connections
+                try:
+                    stream_iter = iter(self.dataset)
+                except Exception:
+                    pass
+
+        logger.info("✅ Buffer filled with %d images. Starting training sample generation.", len(buffer))
+
+        if len(buffer) < self.pages_per_batch:
+            logger.error("❌ Buffer has only %d images, need at least %d (pages_per_batch). Aborting.", len(buffer), self.pages_per_batch)
+            return
+
+        # Phase 2: Yield training samples indefinitely from the buffer.
+        # Simultaneously try to grow the buffer in the background by pulling
+        # one new image from the stream every N yields.
+        yields_since_fetch = 0
+        fetch_every = 5  # try to fetch a new image every 5 yields
+
+        while True:
+            # Sample pages_per_batch different pages from the buffer
+            sampled_pages = random.sample(buffer, min(self.pages_per_batch, len(buffer)))
+
+            for page_img in sampled_pages:
+                all_strips = self._process_image(page_img)
+
+                if len(all_strips) < self.strips_per_page:
+                    continue
+
+                sampled_strips = random.sample(all_strips, self.strips_per_page)
+
+                for strip in sampled_strips:
+                    # Resize to 32px width, pad to 224x224, normalize
+                    new_h = max(1, strip.height * 32 // max(1, strip.width))
+                    strip = strip.resize((32, new_h), Image.Resampling.LANCZOS)
+                    # Pad to 224x224
+                    pad_w = max(0, 224 - strip.width)
+                    pad_h = max(0, 224 - strip.height)
+                    pad_left = pad_w // 2
+                    pad_right = pad_w - pad_left
+                    pad_top = pad_h // 2
+                    pad_bottom = pad_h - pad_top
+
+                    padded_strip = ImageOps.expand(strip, border=(pad_left, pad_top, pad_right, pad_bottom), fill="white")
+                    if padded_strip.size != (224, 224):
+                        padded_strip = padded_strip.resize((224, 224))
+
+                    tensor = TF.to_tensor(padded_strip)
+                    tensor = TF.normalize(tensor, mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+
+                    yield tensor, page_label_counter
+
+                page_label_counter += 1
+
+            # Periodically try to add fresh images to the buffer
+            yields_since_fetch += 1
+            if yields_since_fetch >= fetch_every:
+                yields_since_fetch = 0
+                try:
+                    item = next(stream_iter)
+                    img = item["image"]
+                    if img.mode != "RGB":
+                        img = img.convert("RGB")
+                    buffer.append(img)
+                    # Cap buffer size
+                    if len(buffer) > self.buffer_size:
+                        buffer.pop(random.randint(0, len(buffer) // 2))
+                except StopIteration:
+                    # Stream exhausted, restart it
+                    try:
+                        stream_iter = iter(self.dataset)
+                    except Exception:
+                        pass
+                except Exception:
+                    # Network error — just keep training from existing buffer
+                    pass
 
 
 def validate(model: nn.Module, dataloader: DataLoader, device: torch.device, num_batches: int = 10) -> tuple[float, float]:
@@ -190,6 +244,7 @@ def main() -> None:
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
     parser.add_argument("--train-steps-per-epoch", type=int, default=1000, help="Steps per epoch")
     parser.add_argument("--log-interval", type=int, default=50, help="Log progress every N steps")
+    parser.add_argument("--local", action="store_true", help="Use local HuggingFace cache instead of streaming the dataset.")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -202,12 +257,14 @@ def main() -> None:
     train_dataset = MultiPageStripDataset(
         split="train", 
         pages_per_batch=args.pages_per_batch, 
-        strips_per_page=args.strips_per_page
+        strips_per_page=args.strips_per_page,
+        streaming=not args.local
     )
     val_dataset = MultiPageStripDataset(
         split="val", 
         pages_per_batch=args.pages_per_batch, 
-        strips_per_page=args.strips_per_page
+        strips_per_page=args.strips_per_page,
+        streaming=not args.local
     )
     
     train_loader = DataLoader(train_dataset, batch_size=batch_size)

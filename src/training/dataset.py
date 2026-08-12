@@ -127,6 +127,7 @@ class StreamingShredDataset(IterableDataset):
         cross_doc_ratio: float = 0.25,
         max_image_width: int = 400,
         dataset_path: str = "chainyo/rvl-cdip",
+        streaming: bool = True,
     ) -> None:
         super().__init__()
         self.split = split
@@ -134,6 +135,7 @@ class StreamingShredDataset(IterableDataset):
         self.buffer_size = max(1, buffer_size)
         self.max_image_width = max(32, max_image_width)
         self.dataset_path = dataset_path
+        self.streaming = streaming
 
         # Normalise ratios so they sum to 1.0 --------------------------
         total = positive_ratio + hard_neg_ratio + easy_neg_ratio + cross_doc_ratio
@@ -332,8 +334,11 @@ class StreamingShredDataset(IterableDataset):
         ds = load_dataset(
             self.dataset_path,
             split=self.split,
-            streaming=True,
+            streaming=self.streaming,
         )
+
+        if not self.streaming:
+            ds = ds.to_iterable_dataset()
 
         # Shard the stream across workers so each downloads a distinct slice
         if num_workers > 1:

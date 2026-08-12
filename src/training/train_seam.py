@@ -102,6 +102,11 @@ def parse_args() -> argparse.Namespace:
         default=50,
         help="Step interval for progress logging (default: 50).",
     )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Use local HuggingFace cache instead of streaming the dataset.",
+    )
     return parser.parse_args()
 
 
@@ -175,8 +180,12 @@ def train(args: argparse.Namespace) -> None:
         model = nn.DataParallel(model)
 
     # ---- data ---------------------------------------------------------
-    train_ds = StreamingShredDataset(split="train", transform=_train_transforms())
-    val_ds = StreamingShredDataset(split="test", transform=_val_transforms())
+    train_ds = StreamingShredDataset(
+        split="train", transform=_train_transforms(), streaming=not args.local
+    )
+    val_ds = StreamingShredDataset(
+        split="test", transform=_val_transforms(), streaming=not args.local
+    )
 
     train_loader = DataLoader(
         train_ds,
