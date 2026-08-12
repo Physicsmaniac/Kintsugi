@@ -81,7 +81,26 @@ echo ""
 # --- Install PyTorch ---
 echo -e "${CYAN}🔥 Installing PyTorch...${NC}"
 if [ "$USE_GPU" = true ]; then
-    pip install --quiet torch torchvision
+    CUDA_VER=$(nvidia-smi | grep -oE "CUDA Version: [0-9]+\.[0-9]+" | awk '{print $3}')
+    if [ -n "$CUDA_VER" ]; then
+        echo -e "${CYAN}🔥 Detected Max CUDA Version: ${CUDA_VER}${NC}"
+        MAJOR=$(echo $CUDA_VER | cut -d. -f1)
+        MINOR=$(echo $CUDA_VER | cut -d. -f2)
+        
+        if [ "$MAJOR" -lt 12 ] || ( [ "$MAJOR" -eq 12 ] && [ "$MINOR" -lt 1 ] ); then
+            echo -e "${YELLOW}⚠️  Driver supports < CUDA 12.1. Installing PyTorch cu118 fallback...${NC}"
+            pip install --quiet torch torchvision --index-url https://download.pytorch.org/whl/cu118
+        elif [ "$MAJOR" -eq 12 ] && [ "$MINOR" -lt 4 ]; then
+            echo -e "${YELLOW}⚠️  Driver supports < CUDA 12.4. Installing PyTorch cu121 fallback...${NC}"
+            pip install --quiet torch torchvision --index-url https://download.pytorch.org/whl/cu121
+        else
+            echo -e "${GREEN}✅ Driver supports latest CUDA. Installing default PyTorch...${NC}"
+            pip install --quiet torch torchvision
+        fi
+    else
+        echo -e "${YELLOW}⚠️  Could not detect CUDA version. Installing default PyTorch...${NC}"
+        pip install --quiet torch torchvision
+    fi
 else
     pip install --quiet torch torchvision --index-url https://download.pytorch.org/whl/cpu
 fi
