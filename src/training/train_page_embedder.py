@@ -28,7 +28,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Suppress noisy HTTP probe logs from HuggingFace/httpx internals
-for _noisy in ("httpx", "datasets.load", "huggingface_hub"):
+for _noisy in ("httpx", "huggingface_hub"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 

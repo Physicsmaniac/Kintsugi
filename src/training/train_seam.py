@@ -37,9 +37,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Suppress noisy HTTP probe logs from HuggingFace/httpx internals
-for _noisy in ("httpx", "datasets.load", "huggingface_hub"):
+for _noisy in ("httpx", "huggingface_hub"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
-
 
 # -----------------------------------------------------------------------
 # CLI
@@ -115,11 +114,12 @@ def parse_args() -> argparse.Namespace:
 # -----------------------------------------------------------------------
 
 
-def _train_transforms() -> transforms.Compose:
-    """Build training augmentation pipeline."""
+def _train_transforms():
+    """Transforms for training: random crop and grayscale jitter."""
     return transforms.Compose(
         [
-            transforms.RandomCrop(224, pad_if_needed=True, fill=255),
+            transforms.Resize(256),
+            transforms.RandomCrop(224),
             transforms.RandomGrayscale(p=0.2),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
@@ -127,11 +127,12 @@ def _train_transforms() -> transforms.Compose:
     )
 
 
-def _val_transforms() -> transforms.Compose:
-    """Build validation transform pipeline (deterministic)."""
+def _val_transforms():
+    """Transforms for validation: center crop only."""
     return transforms.Compose(
         [
-            transforms.RandomCrop(224, pad_if_needed=True, fill=255),
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ]

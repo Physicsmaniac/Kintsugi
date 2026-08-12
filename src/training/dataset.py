@@ -27,7 +27,7 @@ from torchvision import transforms
 logger = logging.getLogger(__name__)
 
 # Suppress noisy HTTP probe logs from HuggingFace internals
-for _noisy_logger in ("httpx", "datasets.load", "huggingface_hub"):
+for _noisy_logger in ("httpx", "huggingface_hub"):
     logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
