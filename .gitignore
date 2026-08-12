@@ -33,6 +33,8 @@ checkpoints/
 person5_test_set/
 shredded_randomized/
 evaluation_results/
+benchmark_results/shredded_*/
+
 
 # Metrics outputs (generated)
 Metrics/training_log.csv
