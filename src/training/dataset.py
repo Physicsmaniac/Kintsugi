@@ -334,6 +334,7 @@ class StreamingShredDataset(IterableDataset):
 
         from datasets import Image as HFImage
         import cv2
+        cv2.setNumThreads(0) # Prevent OpenCV from segfaulting when used in forked PyTorch workers
 
         ds = load_dataset(
             self.dataset_path,
