@@ -119,11 +119,33 @@ Compvis_Thesis/
 └── requirements.txt               # Python dependencies
 ```
 
+### Local Disk vs. Streaming Training
+
+By default, the training streams the dataset from HuggingFace to avoid filling your disk. However, this causes severe GPU starvation (0% utilization) due to network bottlenecks.
+
+**Highly Recommended for Fast Training:**
+Use `LOCAL=1` to download and memory-map the dataset to your NVMe drive. This requires a 45-minute upfront download (115 GB space required), but training will be 10x faster.
+
+```bash
+make train-seam LOCAL=1
+```
+
+By default, the `Makefile` will auto-detect your CPU cores (using all cores minus 2) and automatically set `NUM_WORKERS` for optimal data loading. You do not need to set it manually. The default batch size is massively scaled up to `1024` to saturate modern GPUs (like the RTX 5000 series).
+
+### Resuming Training
+
+If your training gets interrupted (OOM kill, manual stop, or crash), you can seamlessly resume from the last epoch's checkpoint. The optimizer state is saved.
+
+```bash
+# Resume training using the local dataset
+make train-seam-resume LOCAL=1
+```
+
 ## 🧪 Training Details
 
 ### SeamResNet (Strip Adjacency)
 
-Trained on `chainyo/rvl-cdip` (streamed from HuggingFace) with four pair types:
+Trained on `chainyo/rvl-cdip` (115GB, 400k images) with four pair types:
 
 | Pair Type | Ratio | Description |
 |---|---|---|
@@ -181,20 +203,18 @@ make benchmark SEAM_MODEL=path/to/your/model.pth
 ### Custom Training Configurations
 
 ```bash
-# Long training run with higher resolution
-make train-seam EPOCHS=50 BATCH_SIZE=128 LR=5e-5 STEPS_PER_EPOCH=5000
-
-# Resume interrupted training
-make train-seam-resume
+# Long training run (using local NVMe dataset)
+make train-seam LOCAL=1 EPOCHS=50 STEPS_PER_EPOCH=5000 LR=5e-5
 
 # More pages per batch for better contrastive learning
-make train-embedder EMB_PAGES_PER_BATCH=16 EMB_STRIPS_PER_PAGE=6 EMB_EPOCHS=30
+make train-embedder LOCAL=1 EMB_PAGES_PER_BATCH=16 EMB_STRIPS_PER_PAGE=6 EMB_EPOCHS=30
 ```
 
 ## 📝 Requirements
 
 - Python 3.10+
 - CUDA GPU recommended (CPU works but is slow)
+- 120GB+ free disk space (if using `LOCAL=1` for fast training)
 - `poppler-utils` for PDF processing
 
 ## License
