@@ -180,12 +180,15 @@ def train(args: argparse.Namespace) -> None:
         logger.info("🔀 Using DataParallel across %d GPUs", torch.cuda.device_count())
         model = nn.DataParallel(model)
 
-    # ---- data ---------------------------------------------------------
+    # buffer_size=200 per worker: enough for cross-document diversity, low enough
+    # to avoid OOM when many workers are running (14 workers × 200 imgs × ~600KB ≈ 1.7GB)
     train_ds = StreamingShredDataset(
-        split="train", transform=_train_transforms(), streaming=not args.local
+        split="train", transform=_train_transforms(), streaming=not args.local,
+        buffer_size=200,
     )
     val_ds = StreamingShredDataset(
-        split="test", transform=_val_transforms(), streaming=not args.local
+        split="test", transform=_val_transforms(), streaming=not args.local,
+        buffer_size=200,
     )
 
     # HuggingFace streaming datasets cannot be forked safely in multiprocess DataLoader
@@ -198,22 +201,20 @@ def train(args: argparse.Namespace) -> None:
     else:
         # Auto-detect: use all cores minus 2 (leave headroom for main thread + system)
         actual_num_workers = max(1, (os.cpu_count() or 4) - 2)
-    logger.info("👷 DataLoader workers: %d (CPU cores: %s)", actual_num_workers, os.cpu_count())
+    # Validation uses fewer workers to avoid OOM when both loaders overlap
+    val_num_workers = min(4, actual_num_workers) if actual_num_workers > 0 else 0
+    logger.info("👷 DataLoader workers: train=%d, val=%d (CPU cores: %s)",
+                actual_num_workers, val_num_workers, os.cpu_count())
 
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
         num_workers=actual_num_workers,
         pin_memory=True,
-        prefetch_factor=8 if actual_num_workers > 0 else None,
+        prefetch_factor=4 if actual_num_workers > 0 else None,
     )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=args.batch_size,
-        num_workers=actual_num_workers,
-        pin_memory=True,
-        prefetch_factor=8 if actual_num_workers > 0 else None,
-    )
+    # Val DataLoader created lazily per epoch to avoid 2x worker memory overhead
+    val_loader = None
 
     # ---- optimiser & scheduler ----------------------------------------
     optimizer = AdamW(model.parameters(), lr=args.lr)
@@ -327,6 +328,16 @@ def train(args: argparse.Namespace) -> None:
 
         # ---- validation phase -----------------------------------------
         logger.info("🔍 Running validation...")
+
+        # Create val DataLoader lazily to avoid OOM from overlapping workers
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=args.batch_size,
+            num_workers=val_num_workers,
+            pin_memory=True,
+            prefetch_factor=4 if val_num_workers > 0 else None,
+        )
+
         model.eval()
         val_loss_sum: float = 0.0
         val_correct: int = 0
@@ -375,6 +386,10 @@ def train(args: argparse.Namespace) -> None:
         val_loss = val_loss_sum / max(1, val_total)
         val_acc = val_correct / max(1, val_total)
         val_time = time.time() - val_start_time
+
+        # Free val workers to reclaim memory before next training epoch
+        del val_loader, val_iter
+        import gc; gc.collect()
 
         # sklearn metrics
         precision = precision_score(all_labels, all_preds, zero_division=0)
