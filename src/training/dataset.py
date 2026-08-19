@@ -356,10 +356,6 @@ class StreamingShredDataset(IterableDataset):
                     logger.debug("⏭️  Skipped corrupt image in dataset: %s", exc)
                     continue
 
-        # Prevent PIL from crashing on truncated/corrupted RVL-CDIP images
-        from PIL import ImageFile
-        ImageFile.LOAD_TRUNCATED_IMAGES = True
-
         for sample in _safe_iter(ds):
             # ---- extract & preprocess image ---------------------------
             raw_img = sample.get("image")
