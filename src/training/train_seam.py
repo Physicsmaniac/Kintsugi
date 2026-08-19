@@ -115,11 +115,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def _train_transforms():
-    """Transforms for training: random crop and grayscale jitter."""
+    """Transforms for training: random crop, white pad, and grayscale jitter."""
     return transforms.Compose(
         [
-            transforms.Resize(256),
-            transforms.RandomCrop(224),
+            transforms.RandomCrop((224, 64), pad_if_needed=True, fill=255),
+            transforms.Pad((80, 0, 80, 0), fill=255),
             transforms.RandomGrayscale(p=0.2),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
@@ -128,11 +128,11 @@ def _train_transforms():
 
 
 def _val_transforms():
-    """Transforms for validation: center crop only."""
+    """Transforms for validation: center crop and white pad."""
     return transforms.Compose(
         [
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
+            transforms.CenterCrop((224, 64)),
+            transforms.Pad((80, 0, 80, 0), fill=255),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ]
