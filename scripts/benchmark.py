@@ -94,8 +94,9 @@ def run_experiment(
 
     true_label_array = np.array([true_page_labels_dict[i] for i in range(len(images))])
 
-    # Compute score matrix
-    score_matrix, _ = compute_score_matrix(seam_model, device, images)
+    # Compute score matrix efficiently using the batched version
+    from src.solver.scoring import compute_score_matrix_batched
+    score_matrix, _ = compute_score_matrix_batched(seam_model, device, images, batch_size=64, num_workers=0)
 
     pred_pages = []
     pred_page_labels = np.full(len(images), -1, dtype=int)
