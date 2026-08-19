@@ -137,6 +137,13 @@ class StreamingShredDataset(IterableDataset):
         self.max_image_width = max(32, max_image_width)
         self.dataset_path = dataset_path
         self.streaming = streaming
+        self._local_ds = None
+
+        # Load local datasets once in the main process to avoid file lock deadlocks
+        # when multiple PyTorch workers spawn simultaneously.
+        if not self.streaming:
+            from datasets import load_dataset
+            self._local_ds = load_dataset(self.dataset_path, split=self.split, streaming=False)
 
         # Normalise ratios so they sum to 1.0 --------------------------
         total = positive_ratio + hard_neg_ratio + easy_neg_ratio + cross_doc_ratio
@@ -332,16 +339,17 @@ class StreamingShredDataset(IterableDataset):
             num_workers,
         )
 
-        ds = load_dataset(
-            self.dataset_path,
-            split=self.split,
-            streaming=self.streaming,
-        )
-
-        # Only manually shard if it's a local Dataset. 
-        # HuggingFace IterableDataset auto-shards itself in PyTorch workers!
-        if not self.streaming and num_workers > 1:
-            ds = ds.shard(num_shards=num_workers, index=worker_id)
+        if self.streaming:
+            from datasets import load_dataset
+            ds = load_dataset(
+                self.dataset_path,
+                split=self.split,
+                streaming=True,
+            )
+        else:
+            ds = self._local_ds
+            if num_workers > 1:
+                ds = ds.shard(num_shards=num_workers, index=worker_id)
 
         # Wrap iteration to catch corrupt images that HuggingFace's decoder
         # fails to open (PIL.UnidentifiedImageError, OSError, etc.)
