@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
         description="Train SeamResNet for strip-pair classification."
     )
     parser.add_argument(
-        "--batch-size", type=int, default=256, help="Mini-batch size (default: 256)."
+        "--batch-size", type=int, default=1024, help="Mini-batch size (default: 1024)."
     )
     parser.add_argument(
         "--epochs", type=int, default=10, help="Number of training epochs (default: 10)."
@@ -197,12 +197,14 @@ def train(args: argparse.Namespace) -> None:
         batch_size=args.batch_size,
         num_workers=actual_num_workers,
         pin_memory=True,
+        prefetch_factor=8 if actual_num_workers > 0 else None,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=args.batch_size,
         num_workers=actual_num_workers,
         pin_memory=True,
+        prefetch_factor=8 if actual_num_workers > 0 else None,
     )
 
     # ---- optimiser & scheduler ----------------------------------------
