@@ -33,7 +33,7 @@ BATCH_SIZE ?= 256
 LR ?= 1e-4
 STEPS_PER_EPOCH ?= 3000
 VAL_STEPS ?= 400
-NUM_WORKERS ?= 8
+NUM_WORKERS ?= 0
 
 # Embedder training defaults
 EMB_EPOCHS ?= 15

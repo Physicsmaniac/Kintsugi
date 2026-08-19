@@ -92,8 +92,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=8,
-        help="DataLoader worker count (default: 8).",
+        default=0,
+        help="DataLoader worker count (0 = auto-detect from CPU cores).",
     )
     parser.add_argument(
         "--log-interval",
@@ -190,7 +190,15 @@ def train(args: argparse.Namespace) -> None:
 
     # HuggingFace streaming datasets cannot be forked safely in multiprocess DataLoader
     # due to internal file locks, so we force num_workers=0 when streaming.
-    actual_num_workers = args.num_workers if args.local else 0
+    if not args.local:
+        actual_num_workers = 0
+        logger.info("🔧 Streaming mode: forcing num_workers=0")
+    elif args.num_workers > 0:
+        actual_num_workers = args.num_workers
+    else:
+        # Auto-detect: use all cores minus 2 (leave headroom for main thread + system)
+        actual_num_workers = max(1, (os.cpu_count() or 4) - 2)
+    logger.info("👷 DataLoader workers: %d (CPU cores: %s)", actual_num_workers, os.cpu_count())
 
     train_loader = DataLoader(
         train_ds,
