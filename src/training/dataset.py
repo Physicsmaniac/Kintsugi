@@ -333,8 +333,7 @@ class StreamingShredDataset(IterableDataset):
         )
 
         from datasets import Image as HFImage
-        import cv2
-        cv2.setNumThreads(0) # Prevent OpenCV from segfaulting when used in forked PyTorch workers
+        from io import BytesIO
 
         ds = load_dataset(
             self.dataset_path,
@@ -342,8 +341,9 @@ class StreamingShredDataset(IterableDataset):
             streaming=self.streaming,
         )
         
-        # Tell HuggingFace NOT to decode the images using PIL.
-        # We will decode the raw bytes using OpenCV to prevent libtiff segfaults!
+        # Tell HuggingFace NOT to decode the images. We will decode them manually
+        # inside the safe iteration block to prevent corrupt RVL-CDIP TIFFs from
+        # crashing the PyTorch workers.
         ds = ds.cast_column("image", HFImage(decode=False))
 
         # Only manually shard if it's a local Dataset. 
@@ -363,6 +363,10 @@ class StreamingShredDataset(IterableDataset):
                     logger.debug("⏭️  Skipped bad row in dataset: %s", exc)
                     continue
 
+        # Prevent PIL from crashing on truncated/corrupted RVL-CDIP images
+        from PIL import ImageFile
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
+
         for sample in _safe_iter(ds):
             # ---- extract & preprocess image ---------------------------
             raw_img_dict = sample.get("image")
@@ -370,12 +374,10 @@ class StreamingShredDataset(IterableDataset):
                 continue
             
             try:
-                # Decode raw bytes using OpenCV (far more robust to corrupt TIFFs than PIL)
-                img_bytes = np.frombuffer(raw_img_dict["bytes"], np.uint8)
-                arr = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
-                if arr is None:
-                    continue
-                arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+                # Decode using PIL and convert to RGB numpy array.
+                # If the image is totally corrupt, it raises UnidentifiedImageError.
+                pil_img = Image.open(BytesIO(raw_img_dict["bytes"]))
+                arr = np.array(pil_img.convert("RGB"))
             except Exception as exc:
                 logger.debug("⏭️  Skipped unreadable image: %s", exc)
                 continue
