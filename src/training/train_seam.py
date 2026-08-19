@@ -14,8 +14,10 @@ Features
 
 import argparse
 import csv
+import gc
 import logging
 import os
+import signal
 from pathlib import Path
 
 import numpy as np
@@ -190,9 +192,28 @@ def train(args: argparse.Namespace) -> None:
     elif args.num_workers > 0:
         actual_num_workers = args.num_workers
     else:
-        # Auto-detect: use cores minus 2, but cap at 8 to prevent OOM.
-        # Each worker holds a buffer of images in RAM (~400 MB per worker).
-        actual_num_workers = min(8, max(1, (os.cpu_count() or 4) - 2))
+        # Smart auto-detect: scale workers based on BOTH cpu cores AND available RAM.
+        cpu_limit = max(1, (os.cpu_count() or 4) - 2)
+
+        # Estimate available RAM by reading /proc/meminfo (Linux)
+        ram_limit = cpu_limit  # fallback: no RAM constraint
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        avail_mb = int(line.split()[1]) // 1024  # kB -> MB
+                        # Reserve 4 GB for OS/GPU/model/page-cache, rest for workers.
+                        # Each worker costs ~500 MB (buffer + PIL decode + prefetch).
+                        usable_mb = max(0, avail_mb - 4096)
+                        ram_limit = max(1, usable_mb // 500)
+                        break
+        except OSError:
+            pass  # Not Linux or no /proc — just use cpu_limit
+
+        actual_num_workers = min(cpu_limit, ram_limit)
+        logger.info("🧠 Auto-scaled workers: cpu_limit=%d, ram_limit=%d → using %d",
+                    cpu_limit, ram_limit, actual_num_workers)
+
     # Validation uses fewer workers to avoid OOM when both loaders overlap
     val_num_workers = min(4, actual_num_workers) if actual_num_workers > 0 else 0
 
@@ -472,10 +493,18 @@ def train(args: argparse.Namespace) -> None:
     logger.info("✅ Training complete. Best val_acc: %.4f", best_val_acc)
 
 
-# -----------------------------------------------------------------------
-# Entry point
-# -----------------------------------------------------------------------
+def _cleanup_and_exit(signum, frame):
+    """Kill the entire process group (main + all DataLoader workers) on signal."""
+    logger.info("🛑 Received signal %d, killing all workers and exiting...", signum)
+    # Kill entire process group so forked DataLoader workers die too
+    os.killpg(os.getpgid(os.getpid()), signal.SIGTERM)
+
 
 if __name__ == "__main__":
+    # Create a new process group so we can kill all children at once
+    os.setpgrp()
+    signal.signal(signal.SIGINT, _cleanup_and_exit)
+    signal.signal(signal.SIGTERM, _cleanup_and_exit)
+
     args = parse_args()
     train(args)
