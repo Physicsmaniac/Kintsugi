@@ -337,12 +337,10 @@ class StreamingShredDataset(IterableDataset):
             streaming=self.streaming,
         )
 
-        # Shard the dataset across workers so each processes a distinct slice
-        if num_workers > 1:
+        # Only manually shard if it's a local Dataset. 
+        # HuggingFace IterableDataset auto-shards itself in PyTorch workers!
+        if not self.streaming and num_workers > 1:
             ds = ds.shard(num_shards=num_workers, index=worker_id)
-
-        if not self.streaming:
-            ds = ds.to_iterable_dataset()
 
         for sample in ds:
             # ---- extract & preprocess image ---------------------------
