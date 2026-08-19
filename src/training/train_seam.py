@@ -182,15 +182,6 @@ def train(args: argparse.Namespace) -> None:
 
     # buffer_size=200 per worker: enough for cross-document diversity, low enough
     # to avoid OOM when many workers are running (14 workers × 200 imgs × ~600KB ≈ 1.7GB)
-    train_ds = StreamingShredDataset(
-        split="train", transform=_train_transforms(), streaming=not args.local,
-        buffer_size=200,
-    )
-    val_ds = StreamingShredDataset(
-        split="test", transform=_val_transforms(), streaming=not args.local,
-        buffer_size=200,
-    )
-
     # HuggingFace streaming datasets cannot be forked safely in multiprocess DataLoader
     # due to internal file locks, so we force num_workers=0 when streaming.
     if not args.local:
@@ -199,12 +190,25 @@ def train(args: argparse.Namespace) -> None:
     elif args.num_workers > 0:
         actual_num_workers = args.num_workers
     else:
-        # Auto-detect: use all cores minus 2 (leave headroom for main thread + system)
-        actual_num_workers = max(1, (os.cpu_count() or 4) - 2)
+        # Auto-detect: use cores minus 2, but cap at 8 to prevent OOM.
+        # Each worker holds a buffer of images in RAM (~400 MB per worker).
+        actual_num_workers = min(8, max(1, (os.cpu_count() or 4) - 2))
     # Validation uses fewer workers to avoid OOM when both loaders overlap
     val_num_workers = min(4, actual_num_workers) if actual_num_workers > 0 else 0
-    logger.info("👷 DataLoader workers: train=%d, val=%d (CPU cores: %s)",
-                actual_num_workers, val_num_workers, os.cpu_count())
+
+    # Scale buffer per worker so total RAM stays bounded (~2 GB total for buffers)
+    buf_per_worker = max(20, 200 // max(1, actual_num_workers))
+    logger.info("👷 DataLoader workers: train=%d, val=%d (CPU cores: %s, buffer/worker: %d)",
+                actual_num_workers, val_num_workers, os.cpu_count(), buf_per_worker)
+
+    train_ds = StreamingShredDataset(
+        split="train", transform=_train_transforms(), streaming=not args.local,
+        buffer_size=buf_per_worker,
+    )
+    val_ds = StreamingShredDataset(
+        split="test", transform=_val_transforms(), streaming=not args.local,
+        buffer_size=buf_per_worker,
+    )
 
     train_loader = DataLoader(
         train_ds,
