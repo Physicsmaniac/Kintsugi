@@ -337,12 +337,12 @@ class StreamingShredDataset(IterableDataset):
             streaming=self.streaming,
         )
 
-        if not self.streaming:
-            ds = ds.to_iterable_dataset()
-
-        # Shard the stream across workers so each downloads a distinct slice
+        # Shard the dataset across workers so each processes a distinct slice
         if num_workers > 1:
             ds = ds.shard(num_shards=num_workers, index=worker_id)
+
+        if not self.streaming:
+            ds = ds.to_iterable_dataset()
 
         for sample in ds:
             # ---- extract & preprocess image ---------------------------
