@@ -332,19 +332,25 @@ class StreamingShredDataset(IterableDataset):
             num_workers,
         )
 
+        from datasets import Image as HFImage
+        import cv2
+
         ds = load_dataset(
             self.dataset_path,
             split=self.split,
             streaming=self.streaming,
         )
+        
+        # Tell HuggingFace NOT to decode the images using PIL.
+        # We will decode the raw bytes using OpenCV to prevent libtiff segfaults!
+        ds = ds.cast_column("image", HFImage(decode=False))
 
         # Only manually shard if it's a local Dataset. 
         # HuggingFace IterableDataset auto-shards itself in PyTorch workers!
         if not self.streaming and num_workers > 1:
             ds = ds.shard(num_shards=num_workers, index=worker_id)
 
-        # Wrap iteration to catch corrupt images that HuggingFace's decoder
-        # fails to open (PIL.UnidentifiedImageError, OSError, etc.)
+        # Wrap iteration to catch unexpected dataset errors
         def _safe_iter(dataset):
             it = iter(dataset)
             while True:
@@ -352,21 +358,25 @@ class StreamingShredDataset(IterableDataset):
                     yield next(it)
                 except StopIteration:
                     return
-                except (PIL.UnidentifiedImageError, OSError, Exception) as exc:
-                    if isinstance(exc, StopIteration):
-                        return
-                    logger.debug("⏭️  Skipped corrupt image in dataset: %s", exc)
+                except Exception as exc:
+                    logger.debug("⏭️  Skipped bad row in dataset: %s", exc)
                     continue
 
         for sample in _safe_iter(ds):
             # ---- extract & preprocess image ---------------------------
-            raw_img: Image.Image | None = sample.get("image")
-            if raw_img is None:
+            raw_img_dict = sample.get("image")
+            if not raw_img_dict or "bytes" not in raw_img_dict:
                 continue
+            
             try:
-                arr = np.array(raw_img.convert("RGB"))
-            except Exception:
-                logger.debug("⏭️  Skipped unreadable image.")
+                # Decode raw bytes using OpenCV (far more robust to corrupt TIFFs than PIL)
+                img_bytes = np.frombuffer(raw_img_dict["bytes"], np.uint8)
+                arr = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
+                if arr is None:
+                    continue
+                arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+            except Exception as exc:
+                logger.debug("⏭️  Skipped unreadable image: %s", exc)
                 continue
 
             if arr.size == 0 or arr.shape[0] < 16 or arr.shape[1] < 16:
