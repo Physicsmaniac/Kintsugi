@@ -20,6 +20,7 @@ from typing import Iterator
 import numpy as np
 import torch
 from datasets import load_dataset  # type: ignore[import-untyped]
+import PIL
 from PIL import Image
 from torch.utils.data import IterableDataset, get_worker_info
 from torchvision import transforms
@@ -342,7 +343,22 @@ class StreamingShredDataset(IterableDataset):
         if not self.streaming and num_workers > 1:
             ds = ds.shard(num_shards=num_workers, index=worker_id)
 
-        for sample in ds:
+        # Wrap iteration to catch corrupt images that HuggingFace's decoder
+        # fails to open (PIL.UnidentifiedImageError, OSError, etc.)
+        def _safe_iter(dataset):
+            it = iter(dataset)
+            while True:
+                try:
+                    yield next(it)
+                except StopIteration:
+                    return
+                except (PIL.UnidentifiedImageError, OSError, Exception) as exc:
+                    if isinstance(exc, StopIteration):
+                        return
+                    logger.debug("⏭️  Skipped corrupt image in dataset: %s", exc)
+                    continue
+
+        for sample in _safe_iter(ds):
             # ---- extract & preprocess image ---------------------------
             raw_img: Image.Image | None = sample.get("image")
             if raw_img is None:
