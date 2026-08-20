@@ -202,6 +202,22 @@ def preprocess_single_strip(
     Returns:
         Normalized tensor of shape (3, size, size).
     """
-    resized = resize_to_training_width(img)
-    padded = pad_to_model_size(resized, size)
-    return normalize_transform(padded)
+    # 1. Resize width to 32px maintaining aspect ratio
+    new_h = max(1, img.height * 32 // max(1, img.width))
+    strip = img.resize((32, new_h), Image.Resampling.LANCZOS)
+    
+    # 2. Pad to 224x224 (if smaller) or add 0 padding if larger
+    pad_w = max(0, size - strip.width)
+    pad_h = max(0, size - strip.height)
+    pad_left = pad_w // 2
+    pad_right = pad_w - pad_left
+    pad_top = pad_h // 2
+    pad_bottom = pad_h - pad_top
+    
+    padded_strip = ImageOps.expand(strip, border=(pad_left, pad_top, pad_right, pad_bottom), fill="white")
+    
+    # 3. Squish to exactly 224x224 if it's taller than 224
+    if padded_strip.size != (size, size):
+        padded_strip = padded_strip.resize((size, size), Image.Resampling.LANCZOS)
+        
+    return normalize_transform(padded_strip)
