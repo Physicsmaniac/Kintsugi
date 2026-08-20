@@ -117,7 +117,8 @@ def run_experiment(
         clusters = cluster_and_refine(
             embeddings=embeddings_arr,
             score_matrix=score_matrix,
-            min_cluster_size=max(2, num_strips // 2)
+            min_cluster_size=max(2, num_strips // 2),
+            use_umap=False,
         )
 
         for cluster_id, strip_indices in clusters.items():
