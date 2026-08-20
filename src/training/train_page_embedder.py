@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import random
+import signal
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Tuple
@@ -65,6 +66,12 @@ class MultiPageStripDataset(IterableDataset):
         self.max_image_width = max(64, max_image_width)
         self.dataset_path = dataset_path
         self.streaming = streaming
+        self._local_ds = None
+
+        # Load local datasets once in the main process to avoid file lock
+        # deadlocks when multiple PyTorch workers spawn simultaneously.
+        if not self.streaming:
+            self._local_ds = load_dataset(self.dataset_path, split=self.split, streaming=False)
 
     def _process_image(self, img: Image.Image) -> list[Image.Image]:
         if img.mode != "RGB":
@@ -97,10 +104,12 @@ class MultiPageStripDataset(IterableDataset):
         # Phase 1: Fill the buffer with an initial batch of images.
         # We use a retry loop so a single timeout doesn't kill the whole run.
         logger.info("🚀 Filling initial buffer for embedder dataset (split=%s)...", self.split)
-        dataset = load_dataset(self.dataset_path, split=self.split, streaming=self.streaming)
-        if not self.streaming:
-            dataset = dataset.to_iterable_dataset()
-        stream_iter = iter(dataset)
+        if self.streaming:
+            dataset = load_dataset(self.dataset_path, split=self.split, streaming=True)
+            stream_iter = iter(dataset)
+        else:
+            dataset = self._local_ds
+            stream_iter = iter(dataset)
         fill_target = min(50, self.buffer_size)
         retries = 0
         max_retries = 10
@@ -253,6 +262,37 @@ def main() -> None:
 
     # Dataset and DataLoader
     batch_size = args.pages_per_batch * args.strips_per_page
+
+    # Container-aware worker detection (same logic as seam trainer)
+    if not args.local:
+        num_workers = 0
+    else:
+        import math as _math
+        effective_cpus = os.cpu_count() or 4
+        # Check cgroup limits (Docker/Vast.ai)
+        try:
+            with open("/sys/fs/cgroup/cpu.max") as f:
+                parts = f.read().strip().split()
+                if parts[0] != "max":
+                    effective_cpus = min(effective_cpus, max(1, _math.ceil(int(parts[0]) / int(parts[1]))))
+        except (OSError, ValueError, IndexError):
+            pass
+        try:
+            with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") as f:
+                quota = int(f.read().strip())
+            if quota > 0:
+                with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as f:
+                    period = int(f.read().strip())
+                effective_cpus = min(effective_cpus, max(1, _math.ceil(quota / period)))
+        except (OSError, ValueError):
+            pass
+        try:
+            effective_cpus = min(effective_cpus, len(os.sched_getaffinity(0)))
+        except (AttributeError, OSError):
+            pass
+        num_workers = max(1, effective_cpus - 2)
+        logger.info("🧠 Effective CPUs: %d → using %d workers", effective_cpus, num_workers)
+
     train_dataset = MultiPageStripDataset(
         split="train", 
         pages_per_batch=args.pages_per_batch, 
@@ -260,14 +300,24 @@ def main() -> None:
         streaming=not args.local
     )
     val_dataset = MultiPageStripDataset(
-        split="val", 
+        split="test", 
         pages_per_batch=args.pages_per_batch, 
         strips_per_page=args.strips_per_page,
         streaming=not args.local
     )
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size)
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=8 if num_workers > 0 else None,
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=batch_size,
+        num_workers=min(2, num_workers),
+        pin_memory=True,
+    )
 
     # Model, Loss, Optimizer
     model = PageEmbeddingNet(embedding_dim=128).to(device)
@@ -386,5 +436,15 @@ def main() -> None:
             torch.save(ckpt_payload, best_path)
             logger.info(f"🏆 New best loss ({best_loss:.4f})! Saved model → {best_path}")
 
+
+def _cleanup_and_exit(signum, frame):
+    """Kill the entire process group (main + all DataLoader workers) on signal."""
+    logger.info("🛑 Received signal %d, killing all workers and exiting...", signum)
+    os.killpg(os.getpgid(os.getpid()), signal.SIGTERM)
+
+
 if __name__ == "__main__":
+    os.setpgrp()
+    signal.signal(signal.SIGINT, _cleanup_and_exit)
+    signal.signal(signal.SIGTERM, _cleanup_and_exit)
     main()
