@@ -112,6 +112,73 @@ def parse_args() -> argparse.Namespace:
 
 
 # -----------------------------------------------------------------------
+# Container-aware CPU detection
+# -----------------------------------------------------------------------
+
+
+def _get_container_cpus() -> int:
+    """Return the number of CPUs actually available to this process.
+
+    In Docker/Vast.ai containers, ``os.cpu_count()`` reports the *host*
+    machine's full thread count (e.g. 128 on an EPYC), not the cores
+    allocated to the container.  This causes DataLoader to spawn far too
+    many workers, exhausting the container's RAM/CPU quota.
+
+    We check, in order:
+    1. cgroup v2  ``cpu.max``  (quota / period)
+    2. cgroup v1  ``cpu.cfs_quota_us / cpu.cfs_period_us``
+    3. ``os.sched_getaffinity(0)``  (respects ``--cpuset-cpus``)
+    4. ``os.cpu_count()``  (bare-metal fallback)
+
+    The returned value is the *minimum* of all readable signals, which
+    gives the tightest real constraint.
+    """
+    import math
+    candidates: list[int] = []
+
+    # --- cgroup v2 -------------------------------------------------------
+    try:
+        with open("/sys/fs/cgroup/cpu.max") as f:
+            parts = f.read().strip().split()
+            if parts[0] != "max":            # "max" means unlimited
+                quota, period = int(parts[0]), int(parts[1])
+                candidates.append(max(1, math.ceil(quota / period)))
+    except (OSError, ValueError, IndexError):
+        pass
+
+    # --- cgroup v1 -------------------------------------------------------
+    try:
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") as f:
+            quota = int(f.read().strip())
+        if quota > 0:                        # -1 means unlimited
+            with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as f:
+                period = int(f.read().strip())
+            candidates.append(max(1, math.ceil(quota / period)))
+    except (OSError, ValueError):
+        pass
+
+    # --- CPU affinity (respects --cpuset-cpus) ----------------------------
+    try:
+        candidates.append(len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        pass  # Not available on all platforms
+
+    # --- bare-metal fallback ----------------------------------------------
+    fallback = os.cpu_count() or 4
+    if not candidates:
+        return fallback
+
+    result = min(candidates)
+    if result != fallback:
+        logger.info(
+            "🐳 Container CPU detection: host reports %d cores, "
+            "container limited to %d",
+            fallback, result,
+        )
+    return result
+
+
+# -----------------------------------------------------------------------
 # Transforms
 # -----------------------------------------------------------------------
 
@@ -182,8 +249,8 @@ def train(args: argparse.Namespace) -> None:
         logger.info("🔀 Using DataParallel across %d GPUs", torch.cuda.device_count())
         model = nn.DataParallel(model)
 
-    # buffer_size=200 per worker: enough for cross-document diversity, low enough
-    # to avoid OOM when many workers are running (14 workers × 200 imgs × ~600KB ≈ 1.7GB)
+    # buffer_size per worker: enough for cross-document diversity, low enough
+    # to avoid OOM when many workers are running.
     # HuggingFace streaming datasets cannot be forked safely in multiprocess DataLoader
     # due to internal file locks, so we force num_workers=0 when streaming.
     if not args.local:
@@ -192,8 +259,9 @@ def train(args: argparse.Namespace) -> None:
     elif args.num_workers > 0:
         actual_num_workers = args.num_workers
     else:
-        # Smart auto-detect: scale workers based on BOTH cpu cores AND available RAM.
-        cpu_limit = max(1, (os.cpu_count() or 4) - 2)
+        # Smart auto-detect: scale workers based on container CPUs AND available RAM.
+        effective_cpus = _get_container_cpus()
+        cpu_limit = max(1, effective_cpus - 2)
 
         # Estimate available RAM by reading /proc/meminfo (Linux)
         ram_limit = cpu_limit  # fallback: no RAM constraint
@@ -211,16 +279,16 @@ def train(args: argparse.Namespace) -> None:
             pass  # Not Linux or no /proc — just use cpu_limit
 
         actual_num_workers = min(cpu_limit, ram_limit)
-        logger.info("🧠 Auto-scaled workers: cpu_limit=%d, ram_limit=%d → using %d",
-                    cpu_limit, ram_limit, actual_num_workers)
+        logger.info("🧠 Auto-scaled workers: effective_cpus=%d, cpu_limit=%d, ram_limit=%d → using %d",
+                    effective_cpus, cpu_limit, ram_limit, actual_num_workers)
 
     # Validation uses fewer workers to avoid OOM when both loaders overlap
     val_num_workers = min(4, actual_num_workers) if actual_num_workers > 0 else 0
 
     # Scale buffer per worker so total RAM stays bounded (~2 GB total for buffers)
     buf_per_worker = max(20, 200 // max(1, actual_num_workers))
-    logger.info("👷 DataLoader workers: train=%d, val=%d (CPU cores: %s, buffer/worker: %d)",
-                actual_num_workers, val_num_workers, os.cpu_count(), buf_per_worker)
+    logger.info("👷 DataLoader workers: train=%d, val=%d (effective CPUs: %d, buffer/worker: %d)",
+                actual_num_workers, val_num_workers, _get_container_cpus(), buf_per_worker)
 
     train_ds = StreamingShredDataset(
         split="train", transform=_train_transforms(), streaming=not args.local,
