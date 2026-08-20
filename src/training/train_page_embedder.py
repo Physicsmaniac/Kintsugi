@@ -328,7 +328,7 @@ def main() -> None:
     scaler = torch.amp.GradScaler(device.type)
 
     start_epoch = 0
-    best_loss = float("inf")
+    best_gap = -float("inf")
 
     if args.resume:
         logger.info(f"🔄 Resuming from {args.resume}")
@@ -337,7 +337,7 @@ def main() -> None:
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
         start_epoch = checkpoint["epoch"]
-        best_loss = checkpoint.get("best_loss", best_loss)
+        best_gap = checkpoint.get("best_gap", best_gap)
 
     csv_path = Path(args.output_dir) / "training_log.csv"
     file_exists = csv_path.exists()
@@ -420,7 +420,7 @@ def main() -> None:
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
-            "best_loss": best_loss,
+            "best_gap": best_gap,
         }
 
         # Save latest model
@@ -428,13 +428,13 @@ def main() -> None:
         torch.save(ckpt_payload, latest_path)
         logger.info(f"💾 Saved latest checkpoint → {latest_path}")
 
-        # Save best model by loss
-        if avg_train_loss < best_loss:
-            best_loss = avg_train_loss
-            ckpt_payload["best_loss"] = best_loss
+        # Save best model by separation gap
+        if sim_gap > best_gap:
+            best_gap = sim_gap
+            ckpt_payload["best_gap"] = best_gap
             best_path = Path(args.output_dir) / "best_page_embedder.pth"
             torch.save(ckpt_payload, best_path)
-            logger.info(f"🏆 New best loss ({best_loss:.4f})! Saved model → {best_path}")
+            logger.info(f"🏆 New best separation gap ({best_gap:+.4f})! Saved model → {best_path}")
 
 
 def _cleanup_and_exit(signum, frame):
