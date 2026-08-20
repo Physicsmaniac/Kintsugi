@@ -304,7 +304,8 @@ def train(args: argparse.Namespace) -> None:
         batch_size=args.batch_size,
         num_workers=actual_num_workers,
         pin_memory=True,
-        prefetch_factor=4 if actual_num_workers > 0 else None,
+        persistent_workers=actual_num_workers > 0,
+        prefetch_factor=8 if actual_num_workers > 0 else None,
     )
     # Val DataLoader created lazily per epoch to avoid 2x worker memory overhead
     val_loader = None
