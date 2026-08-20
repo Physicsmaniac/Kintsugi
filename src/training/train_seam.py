@@ -285,8 +285,9 @@ def train(args: argparse.Namespace) -> None:
     # Validation uses fewer workers to avoid OOM when both loaders overlap
     val_num_workers = min(4, actual_num_workers) if actual_num_workers > 0 else 0
 
-    # Scale buffer per worker so total RAM stays bounded (~2 GB total for buffers)
-    buf_per_worker = max(20, 200 // max(1, actual_num_workers))
+    # Fixed buffer per worker. 100 images × ~2 MB × N workers stays reasonable
+    # while giving cross-document negatives enough diversity.
+    buf_per_worker = 100
     logger.info("👷 DataLoader workers: train=%d, val=%d (effective CPUs: %d, buffer/worker: %d)",
                 actual_num_workers, val_num_workers, _get_container_cpus(), buf_per_worker)
 
