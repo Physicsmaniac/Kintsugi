@@ -92,12 +92,9 @@ def _reduce_pca(
     reduced : np.ndarray
         (n_samples, min(n_components, …)) PCA-projected embeddings.
     """
-    scaler = StandardScaler()
-    scaled = scaler.fit_transform(embeddings)
-
-    n_components = min(n_components, scaled.shape[0], scaled.shape[1])
+    n_components = min(n_components, embeddings.shape[0], embeddings.shape[1])
     pca = PCA(n_components=n_components, random_state=random_state)
-    reduced = pca.fit_transform(scaled)
+    reduced = pca.fit_transform(embeddings)
 
     explained = pca.explained_variance_ratio_.sum()
     logger.info(
