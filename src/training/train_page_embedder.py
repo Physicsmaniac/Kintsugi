@@ -159,24 +159,8 @@ class MultiPageStripDataset(IterableDataset):
                 sampled_strips = random.sample(all_strips, self.strips_per_page)
 
                 for strip in sampled_strips:
-                    # Resize to 32px width, pad to 224x224, normalize
-                    new_h = max(1, strip.height * 32 // max(1, strip.width))
-                    strip = strip.resize((32, new_h), Image.Resampling.LANCZOS)
-                    # Pad to 224x224
-                    pad_w = max(0, 224 - strip.width)
-                    pad_h = max(0, 224 - strip.height)
-                    pad_left = pad_w // 2
-                    pad_right = pad_w - pad_left
-                    pad_top = pad_h // 2
-                    pad_bottom = pad_h - pad_top
-
-                    padded_strip = ImageOps.expand(strip, border=(pad_left, pad_top, pad_right, pad_bottom), fill="white")
-                    if padded_strip.size != (224, 224):
-                        padded_strip = padded_strip.resize((224, 224))
-
-                    tensor = TF.to_tensor(padded_strip)
-                    tensor = TF.normalize(tensor, mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-
+                    # Use the shared preprocessing pipeline to ensure inference/training match
+                    tensor = preprocess_single_strip(strip)
                     yield tensor, page_label_counter
 
                 page_label_counter += 1
