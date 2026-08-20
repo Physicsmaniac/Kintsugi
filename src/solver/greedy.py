@@ -130,38 +130,53 @@ def solve_greedy(
         n, threshold, min_chain_length,
     )
 
-    available: set[int] = set(range(n))
-    pages: list[list[int]] = []
+    edges = [(i, j, float(score_matrix[i, j])) for i in range(n) for j in range(n) if i != j]
+    edges.sort(key=lambda x: x[2], reverse=True)
 
-    while available:
-        best_chain: list[int] = []
-        best_chain_score: float = -1.0
-
-        # Try every remaining strip as a potential start
-        for start in available:
-            chain, chain_score = _build_chain(
-                start, score_matrix, available, threshold,
-            )
-            if chain_score > best_chain_score:
-                best_chain = chain
-                best_chain_score = chain_score
-
-        # Only commit chains that meet the minimum length
-        if len(best_chain) >= min_chain_length:
-            pages.append(best_chain)
-            for idx in best_chain:
-                available.discard(idx)
-            logger.debug(
-                "  Committed chain of length %d (score=%.3f): %s",
-                len(best_chain), best_chain_score, best_chain,
-            )
-        else:
-            # No viable chain found — break and dump remaining as singletons
+    next_node: dict[int, int] = {}
+    prev_node: dict[int, int] = {}
+    
+    for u, v, score in edges:
+        if score < threshold:
             break
+        if u in next_node or v in prev_node:
+            continue
+        # Prevent forming cycles
+        curr = v
+        forms_cycle = False
+        while curr in next_node:
+            curr = next_node[curr]
+            if curr == u:
+                forms_cycle = True
+                break
+        if not forms_cycle:
+            next_node[u] = v
+            prev_node[v] = u
 
-    # Remaining strips become singleton pages
-    for idx in sorted(available):
-        pages.append([idx])
+    # Build resulting chains from root nodes
+    visited = set()
+    pages: list[list[int]] = []
+    starts = [i for i in range(n) if i not in prev_node]
+    
+    for start in starts:
+        if start in visited:
+            continue
+        chain = []
+        curr = start
+        while curr is not None:
+            chain.append(curr)
+            visited.add(curr)
+            curr = next_node.get(curr)
+            
+        if len(chain) >= min_chain_length:
+            pages.append(chain)
+        else:
+            for idx in chain:
+                pages.append([idx])
+
+    for i in range(n):
+        if i not in visited:
+            pages.append([i])
 
     logger.info(
         "Greedy solver finished: %d pages (%d multi-strip, %d singletons)",

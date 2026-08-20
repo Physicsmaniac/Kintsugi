@@ -66,7 +66,9 @@ def build_cost_matrix(
     else:
         probs = np.asarray(scores, dtype=np.float64)
 
-    costs = 1.0 - probs
+    eps = 1e-6
+    probs = np.clip(probs, eps, 1.0 - eps)
+    costs = -np.log(probs)
     # Zero out diagonal (self-adjacency is meaningless)
     np.fill_diagonal(costs, 0.0)
     return costs
