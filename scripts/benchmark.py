@@ -111,6 +111,7 @@ def run_experiment(
             for img in images:
                 tensor = preprocess_single_strip(img).unsqueeze(0).to(device)
                 emb = page_model(tensor)
+                emb = torch.nn.functional.normalize(emb, p=2, dim=1)
                 embeddings.append(emb.squeeze(0).cpu().numpy())
 
         embeddings_arr = np.array(embeddings)
