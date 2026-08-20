@@ -201,14 +201,17 @@ def cluster_strips_by_page(
         return {0: list(range(n))}
 
     # --- Dimensionality reduction ---
-    reduced = _reduce_pca(embeddings, n_components=50, random_state=random_state)
-
-    if use_umap and _UMAP_AVAILABLE and reduced.shape[0] > umap_n_components + 2:
-        reduced = _reduce_umap(
-            reduced,
-            n_components=umap_n_components,
-            random_state=random_state,
-        )
+    if use_umap:
+        reduced = _reduce_pca(embeddings, n_components=50, random_state=random_state)
+        if _UMAP_AVAILABLE and reduced.shape[0] > umap_n_components + 2:
+            reduced = _reduce_umap(
+                reduced,
+                n_components=umap_n_components,
+                random_state=random_state,
+            )
+    else:
+        # Use raw L2-normalized embeddings directly (StandardScaler destroys hypersphere topology)
+        reduced = embeddings
 
     # --- HDBSCAN ---
     clusterer = hdbscan.HDBSCAN(
