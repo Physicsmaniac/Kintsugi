@@ -50,6 +50,7 @@ PDF ?= $(DATA_DIR)/206-10001-10017.pdf
 NUM_PAGES ?= 2 5 10
 NUM_STRIPS ?= 10
 STRATEGIES ?= greedy atsp hdbscan+greedy hdbscan+atsp
+GREEDY_THRESHOLDS ?= 0.25 0.50 0.75
 
 # =============================================================================
 # PHONY targets
@@ -180,6 +181,7 @@ benchmark: ## Run the full benchmark suite (set PDF=path/to/file.pdf)
 		--num-pages $(NUM_PAGES) \
 		--num-strips $(NUM_STRIPS) \
 		--strategies $(STRATEGIES) \
+		--greedy-thresholds $(GREEDY_THRESHOLDS) \
 		--output-dir $(BENCHMARK_DIR)
 	@echo "✅ Results saved to $(BENCHMARK_DIR)/"
 
