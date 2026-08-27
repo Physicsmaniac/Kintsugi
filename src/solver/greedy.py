@@ -237,3 +237,158 @@ def solve_greedy_with_clusters(
         ordered[label] = flat_order
 
     return ordered
+
+
+def solve_kruskal_greedy(
+    score_matrix: np.ndarray,
+    threshold: float = 0.3,
+    min_chain_length: int = 2,
+) -> list[list[int]]:
+    """Kruskal-style global edge-selection solver for strip ordering.
+
+    Instead of building chains from a single start node, this solver
+    globally sorts ALL directed edges by confidence and greedily accepts
+    the best edge that doesn't violate path constraints:
+      * Each node has at most one outgoing edge (right neighbor).
+      * Each node has at most one incoming edge (left neighbor).
+      * No cycles are formed until all nodes are connected.
+
+    This is analogous to Kruskal's MST algorithm applied to directed
+    Hamiltonian path construction.
+
+    Parameters
+    ----------
+    score_matrix : np.ndarray
+        n×n asymmetric score matrix.  ``score_matrix[i, j]`` is the
+        probability that strip *j* is immediately right of strip *i*.
+    threshold : float
+        Minimum edge confidence to accept (default: 0.3, lower than
+        the chain-based greedy since we're selecting globally).
+    min_chain_length : int
+        Chains shorter than this are not committed as pages; their
+        strips are returned as singletons at the end.
+
+    Returns
+    -------
+    pages : list[list[int]]
+        Ordered list of pages, each page being an ordered list of strip
+        indices.  Unassigned strips appear as singleton lists at the end.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> scores = np.array([
+    ...     [0.0, 0.9, 0.1],
+    ...     [0.1, 0.0, 0.8],
+    ...     [0.2, 0.1, 0.0],
+    ... ])
+    >>> solve_kruskal_greedy(scores, threshold=0.5)
+    [[0, 1, 2]]
+    """
+    n = score_matrix.shape[0]
+    if n == 0:
+        return []
+    if n == 1:
+        return [[0]]
+
+    logger.info(
+        "Kruskal greedy solver: n=%d, threshold=%.2f",
+        n, threshold,
+    )
+
+    # Collect all directed edges (i -> j) with score above threshold
+    edges = []
+    for i in range(n):
+        for j in range(n):
+            if i != j and score_matrix[i, j] >= threshold:
+                edges.append((i, j, float(score_matrix[i, j])))
+
+    # Sort by descending score (best edges first)
+    edges.sort(key=lambda x: x[2], reverse=True)
+
+    # Track which nodes have outgoing/incoming edges assigned
+    has_right = {}   # node -> its right neighbor
+    has_left = {}    # node -> its left neighbor
+
+    def find_chain_end(start: int) -> int:
+        """Follow right-links from start to find the chain's rightmost node."""
+        curr = start
+        while curr in has_right:
+            curr = has_right[curr]
+        return curr
+
+    def find_chain_start(end: int) -> int:
+        """Follow left-links from end to find the chain's leftmost node."""
+        curr = end
+        while curr in has_left:
+            curr = has_left[curr]
+        return curr
+
+    def would_form_cycle(u: int, v: int) -> bool:
+        """Check if adding edge u->v would create a cycle."""
+        # A cycle forms if v is already an ancestor of u in the chain
+        curr = find_chain_start(u)
+        return curr == v
+
+    accepted = 0
+    for u, v, score in edges:
+        # Skip if u already has a right neighbor
+        if u in has_right:
+            continue
+        # Skip if v already has a left neighbor
+        if v in has_left:
+            continue
+        # Skip if it would form a cycle
+        if would_form_cycle(u, v):
+            continue
+
+        has_right[u] = v
+        has_left[v] = u
+        accepted += 1
+
+        # Stop early if we've connected all possible edges (n-1 for a single path)
+        if accepted >= n - 1:
+            break
+
+    # Build chains by finding all chain starts (nodes with no left neighbor)
+    visited = set()
+    pages = []
+    singletons = []
+
+    for i in range(n):
+        if i in visited:
+            continue
+        if i in has_left:
+            continue  # Not a chain start
+
+        # Build chain from this start
+        chain = []
+        curr = i
+        while curr is not None:
+            chain.append(curr)
+            visited.add(curr)
+            curr = has_right.get(curr)
+
+        if len(chain) >= min_chain_length:
+            pages.append(chain)
+        else:
+            singletons.extend(chain)
+
+    # Any remaining unvisited nodes (shouldn't happen, but just in case)
+    for i in range(n):
+        if i not in visited:
+            singletons.append(i)
+
+    # Singletons become individual pages
+    for idx in sorted(singletons):
+        pages.append([idx])
+
+    logger.info(
+        "Kruskal greedy solver finished: %d pages (%d multi-strip, %d singletons), "
+        "%d edges accepted",
+        len(pages),
+        sum(1 for p in pages if len(p) > 1),
+        sum(1 for p in pages if len(p) == 1),
+        accepted,
+    )
+    return pages

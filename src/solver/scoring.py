@@ -25,7 +25,9 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from src.data.preprocessing import (
+    TRAINING_STRIP_WIDTH as _PREPROC_STRIP_WIDTH,
     create_seam_pair,
+    create_seam_edge_pair,
     get_crops,
     normalize_transform,
     pad_to_model_size,
@@ -35,7 +37,7 @@ from src.data.preprocessing import (
 
 logger = logging.getLogger(__name__)
 
-TRAINING_STRIP_WIDTH: int = 32
+TRAINING_STRIP_WIDTH: int = _PREPROC_STRIP_WIDTH
 CROP_SIZE: int = 224
 NUM_CROPS: int = 3
 
@@ -70,8 +72,12 @@ def _score_pair(
 
     *score* is the averaged sigmoid probability; *logit* is the averaged
     raw model output (pre-sigmoid), useful for temperature scaling later.
+
+    Uses seam-edge pair construction: takes only the boundary pixels from
+    each strip, matching the training-time pair generation.
     """
-    combined = create_seam_pair(img_a, img_b, training_strip_width=TRAINING_STRIP_WIDTH)
+    # Use edge-based pair for consistency with the new training pipeline
+    combined = create_seam_edge_pair(img_a, img_b, edge_width=TRAINING_STRIP_WIDTH)
     crops = get_crops(combined, crop_size=CROP_SIZE)
 
     # Ensure exactly NUM_CROPS crops (duplicate if only 1)
@@ -166,7 +172,8 @@ class InferenceDataset(Dataset):
 
     def __init__(self, images: list[Image.Image]) -> None:
         super().__init__()
-        self.prepared: list[Image.Image] = [_prepare_strip(img) for img in images]
+        # Store original images for edge-based pair construction
+        self.images = images
         self.n = len(images)
         # Build an index of (i, j) pairs excluding diagonal
         self.pairs: list[tuple[int, int]] = [
@@ -178,9 +185,10 @@ class InferenceDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor | int]:
         i, j = self.pairs[idx]
-        combined = create_seam_pair(
-            self.prepared[i], self.prepared[j],
-            training_strip_width=TRAINING_STRIP_WIDTH,
+        # Use edge-based pair construction matching training pipeline
+        combined = create_seam_edge_pair(
+            self.images[i], self.images[j],
+            edge_width=TRAINING_STRIP_WIDTH,
         )
         crops = get_crops(combined, crop_size=CROP_SIZE)
         while len(crops) < NUM_CROPS:

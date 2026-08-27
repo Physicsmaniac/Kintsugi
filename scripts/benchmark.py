@@ -19,10 +19,13 @@ from PIL import Image
 from src.models.seam_model import load_seam_model
 from src.models.page_embedder import load_page_embedder
 from src.solver.scoring import compute_score_matrix
-from src.solver.greedy import solve_greedy
+from src.solver.greedy import solve_greedy, solve_kruskal_greedy, solve_greedy_with_clusters
 from src.solver.atsp import solve_atsp
 from src.solver.clustering import (
     cluster_and_refine,
+    cluster_and_refine_joint,
+    cluster_spectral,
+    build_joint_affinity,
 )
 from src.evaluation.metrics import evaluate_reconstruction
 from src.data.shredder import shred_pdf
@@ -100,10 +103,11 @@ def run_experiment(
 
     pred_pages = []
     pred_page_labels = np.full(len(images), -1, dtype=int)
+    is_clustered = "hdbscan" in strategy or "spectral" in strategy
 
-    if "hdbscan" in strategy:
+    if is_clustered:
         if page_model is None:
-            raise ValueError("HDBSCAN strategy requires page_model.")
+            raise ValueError(f"Strategy {strategy} requires page_model.")
 
         embeddings = []
         page_model.eval()
@@ -115,12 +119,21 @@ def run_experiment(
                 embeddings.append(emb.squeeze(0).cpu().numpy())
 
         embeddings_arr = np.array(embeddings)
-        clusters = cluster_and_refine(
-            embeddings=embeddings_arr,
-            score_matrix=score_matrix,
-            min_cluster_size=max(2, num_strips // 2),
-            use_umap=True,
-        )
+        
+        if "spectral" in strategy:
+            clusters = cluster_and_refine_joint(
+                embeddings=embeddings_arr,
+                score_matrix=score_matrix,
+                num_pages=num_pages,
+                alpha=0.5,
+            )
+        else:
+            clusters = cluster_and_refine(
+                embeddings=embeddings_arr,
+                score_matrix=score_matrix,
+                min_cluster_size=max(2, num_strips // 2),
+                use_umap=True,
+            )
 
         for cluster_id, strip_indices in clusters.items():
             if len(strip_indices) == 0:
@@ -131,22 +144,31 @@ def run_experiment(
 
             sub_matrix = score_matrix[np.ix_(strip_indices, strip_indices)]
 
-            if "greedy" in strategy:
+            if "kruskal" in strategy:
+                from src.solver.greedy import solve_kruskal_greedy
+                chains = solve_kruskal_greedy(sub_matrix, threshold=greedy_threshold)
+                for chain in chains:
+                    pred_pages.append([strip_indices[i] for i in chain])
+            elif "greedy" in strategy:
                 chains = solve_greedy(sub_matrix, threshold=greedy_threshold)
                 for chain in chains:
                     pred_pages.append([strip_indices[i] for i in chain])
             elif "atsp" in strategy:
-                order = solve_atsp(sub_matrix, temperature=1.0)
+                order = solve_atsp(sub_matrix, temperature=1.0, use_log_cost=True)
                 pred_pages.append([strip_indices[i] for i in order])
             else:
                 raise ValueError(f"Unknown solver in strategy {strategy}")
     else:
         # Global solver without clustering
-        if "greedy" in strategy:
+        if "kruskal" in strategy:
+            from src.solver.greedy import solve_kruskal_greedy
+            chains = solve_kruskal_greedy(score_matrix, threshold=greedy_threshold)
+            pred_pages = chains
+        elif "greedy" in strategy:
             chains = solve_greedy(score_matrix, threshold=greedy_threshold)
             pred_pages = chains
         elif "atsp" in strategy:
-            global_order = solve_atsp(score_matrix, temperature=1.0)
+            global_order = solve_atsp(score_matrix, temperature=1.0, use_log_cost=True)
             pred_pages = [global_order]
         else:
             raise ValueError(f"Unknown strategy {strategy}")
@@ -155,8 +177,8 @@ def run_experiment(
         pred_pages=pred_pages,
         true_pages=true_pages,
         true_page_labels=true_page_labels_dict,
-        pred_page_labels=pred_page_labels if "hdbscan" in strategy else None,
-        true_label_array=true_label_array if "hdbscan" in strategy else None,
+        pred_page_labels=pred_page_labels if is_clustered else None,
+        true_label_array=true_label_array if is_clustered else None,
     )
 
     return metrics
@@ -185,7 +207,7 @@ def main() -> None:
         "--strategies",
         type=str,
         nargs="+",
-        default=["greedy", "atsp", "hdbscan+greedy", "hdbscan+atsp"],
+        default=["kruskal", "atsp", "spectral+kruskal", "spectral+atsp", "spectral+greedy", "hdbscan+greedy", "hdbscan+atsp"],
         help="Strategies to run",
     )
     parser.add_argument(
@@ -208,7 +230,7 @@ def main() -> None:
     seam_model, _ = load_seam_model(args.seam_model, device)
 
     page_model = None
-    if args.page_model and any("hdbscan" in s for s in args.strategies):
+    if args.page_model and any(c in s for s in args.strategies for c in ["hdbscan", "spectral"]):
         page_model, _ = load_page_embedder(args.page_model, device)
 
     results = []
@@ -223,7 +245,7 @@ def main() -> None:
         for p, s, strat in itertools.product(
             args.num_pages, args.num_strips, args.strategies
         ):
-            thresholds = args.greedy_thresholds if "greedy" in strat else [0.0]
+            thresholds = args.greedy_thresholds if any(k in strat for k in ["greedy", "kruskal"]) else [0.0]
             
             for threshold in thresholds:
                 metrics = run_experiment(

@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, IterableDataset
+from torchvision import transforms as T
 from PIL import Image, ImageOps
 from datasets import load_dataset
 
@@ -72,6 +73,11 @@ class MultiPageStripDataset(IterableDataset):
         # deadlocks when multiple PyTorch workers spawn simultaneously.
         if not self.streaming:
             self._local_ds = load_dataset(self.dataset_path, split=self.split, streaming=False)
+
+        self.strip_augment = T.Compose([
+            T.RandomApply([T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2)], p=0.5),
+            T.RandomGrayscale(p=0.2),
+        ])
 
     def _process_image(self, img: Image.Image) -> list[Image.Image]:
         if img.mode != "RGB":
@@ -159,8 +165,9 @@ class MultiPageStripDataset(IterableDataset):
                 sampled_strips = random.sample(all_strips, self.strips_per_page)
 
                 for strip in sampled_strips:
-                    # Use the shared preprocessing pipeline to ensure inference/training match
-                    tensor = preprocess_single_strip(strip)
+                    # Apply augmentation to PIL strip
+                    augmented_strip = self.strip_augment(strip)
+                    tensor = preprocess_single_strip(augmented_strip)
                     yield tensor, page_label_counter
 
                 page_label_counter += 1
@@ -230,8 +237,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train PageEmbeddingNet")
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs to train")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
-    parser.add_argument("--pages-per-batch", type=int, default=8, help="Pages per batch")
-    parser.add_argument("--strips-per-page", type=int, default=4, help="Strips per page")
+    parser.add_argument("--pages-per-batch", type=int, default=16, help="Pages per batch")
+    parser.add_argument("--strips-per-page", type=int, default=6, help="Strips per page")
     parser.add_argument("--output-dir", type=str, default="checkpoints", help="Output directory")
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
     parser.add_argument("--train-steps-per-epoch", type=int, default=1000, help="Steps per epoch")
@@ -305,7 +312,7 @@ def main() -> None:
 
     # Model, Loss, Optimizer
     model = PageEmbeddingNet(embedding_dim=128).to(device)
-    criterion = SupConLoss(temperature=0.07).to(device)
+    criterion = SupConLoss(temperature=0.12).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     
@@ -358,7 +365,7 @@ def main() -> None:
             optimizer.zero_grad()
             
             with torch.amp.autocast(device.type):
-                embeddings = model(images)
+                embeddings = model(images, use_projection=True)
                 loss = criterion(embeddings, labels)
                 
             scaler.scale(loss).backward()

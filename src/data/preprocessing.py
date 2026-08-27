@@ -16,7 +16,7 @@ from torchvision import transforms
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
-TRAINING_STRIP_WIDTH = 32
+TRAINING_STRIP_WIDTH = 48
 CROP_SIZE = 224
 
 # --- Shared Transform ---
@@ -202,9 +202,10 @@ def preprocess_single_strip(
     Returns:
         Normalized tensor of shape (3, size, size).
     """
-    # 1. Resize width to 32px maintaining aspect ratio
-    new_h = max(1, img.height * 32 // max(1, img.width))
-    strip = img.resize((32, new_h), Image.Resampling.LANCZOS)
+    # 1. Resize width to TRAINING_STRIP_WIDTH maintaining aspect ratio
+    target_w = TRAINING_STRIP_WIDTH
+    new_h = max(1, img.height * target_w // max(1, img.width))
+    strip = img.resize((target_w, new_h), Image.Resampling.LANCZOS)
     
     # 2. Pad to 224x224 (if smaller) or add 0 padding if larger
     pad_w = max(0, size - strip.width)
@@ -221,3 +222,52 @@ def preprocess_single_strip(
         padded_strip = padded_strip.resize((size, size), Image.Resampling.LANCZOS)
         
     return normalize_transform(padded_strip)
+
+
+def create_seam_edge_pair(
+    img_a: Image.Image,
+    img_b: Image.Image,
+    edge_width: int = TRAINING_STRIP_WIDTH,
+) -> Image.Image:
+    """Create a seam pair using only the edge regions of two strips.
+
+    Instead of resizing full strips, this function takes the rightmost
+    ``edge_width`` pixels of strip A and the leftmost ``edge_width``
+    pixels of strip B, preserving seam boundary detail at higher resolution.
+
+    This is the recommended approach for training when strips are wider
+    than ``TRAINING_STRIP_WIDTH``, as it avoids the information loss from
+    aggressive downscaling.
+
+    Args:
+        img_a: Left strip (PIL image).
+        img_b: Right strip (PIL image).
+        edge_width: Number of pixels to take from each strip's seam edge.
+
+    Returns:
+        Combined image, (edge_width * 2) × min_height pixels.
+    """
+    w_a, h_a = img_a.size
+    w_b, h_b = img_b.size
+
+    # Take the right edge of strip A
+    if w_a > edge_width:
+        left_edge = img_a.crop((w_a - edge_width, 0, w_a, h_a))
+    else:
+        left_edge = resize_to_training_width(img_a, edge_width)
+
+    # Take the left edge of strip B
+    if w_b > edge_width:
+        right_edge = img_b.crop((0, 0, edge_width, h_b))
+    else:
+        right_edge = resize_to_training_width(img_b, edge_width)
+
+    min_h = min(left_edge.size[1], right_edge.size[1])
+    left_edge = left_edge.crop((0, 0, edge_width, min_h))
+    right_edge = right_edge.crop((0, 0, edge_width, min_h))
+
+    combined = Image.new("RGB", (edge_width * 2, min_h))
+    combined.paste(left_edge, (0, 0))
+    combined.paste(right_edge, (edge_width, 0))
+    return combined
+

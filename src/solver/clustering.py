@@ -549,3 +549,75 @@ def cluster_and_refine(
         len(final), [len(v) for v in final.values()],
     )
     return final
+
+
+def build_joint_affinity(
+    embeddings: np.ndarray,
+    score_matrix: np.ndarray,
+    alpha: float = 0.5,
+) -> np.ndarray:
+    """Build a joint affinity matrix combining embedding similarity and seam scores."""
+    # Cosine similarity from embeddings
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-12)
+    normalized = embeddings / norms
+    cos_sim = normalized @ normalized.T
+    
+    # Symmetrize seam scores
+    seam_sym = (score_matrix + score_matrix.T) / 2.0
+    
+    # Combine
+    affinity = alpha * cos_sim + (1 - alpha) * seam_sym
+    np.fill_diagonal(affinity, 0.0)
+    return affinity
+
+def cluster_spectral(
+    affinity: np.ndarray,
+    num_clusters: int,
+    random_state: int = 42,
+) -> dict[int, list[int]]:
+    """Spectral clustering with known number of clusters.
+    
+    Much more reliable than HDBSCAN for small sample sizes (20-100 strips).
+    """
+    from sklearn.cluster import SpectralClustering
+    
+    n = affinity.shape[0]
+    if n <= num_clusters:
+        return {i: [i] for i in range(n)}
+    
+    # Ensure affinity is non-negative for spectral clustering
+    affinity_nn = affinity - affinity.min()
+    np.fill_diagonal(affinity_nn, 0.0)
+    
+    sc = SpectralClustering(
+        n_clusters=num_clusters,
+        affinity='precomputed',
+        random_state=random_state,
+        assign_labels='kmeans',
+        n_init=10,
+    )
+    labels = sc.fit_predict(affinity_nn)
+    
+    clusters = {}
+    for idx, lbl in enumerate(labels):
+        clusters.setdefault(int(lbl), []).append(idx)
+    
+    logger.info("Spectral clustering: %d clusters, sizes: %s",
+                len(clusters), [len(v) for v in clusters.values()])
+    return clusters
+
+def cluster_and_refine_joint(
+    embeddings: np.ndarray,
+    score_matrix: np.ndarray,
+    num_pages: int,
+    alpha: float = 0.5,
+    random_state: int = 42,
+) -> dict[int, list[int]]:
+    """Full pipeline using joint affinity + spectral clustering.
+    
+    This is the recommended approach when num_pages is known.
+    """
+    affinity = build_joint_affinity(embeddings, score_matrix, alpha=alpha)
+    clusters = cluster_spectral(affinity, num_clusters=num_pages, random_state=random_state)
+    return clusters

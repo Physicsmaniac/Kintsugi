@@ -40,8 +40,16 @@ class PageEmbeddingNet(nn.Module):
             nn.ReLU(),
             nn.Linear(256, embedding_dim),
         )
+        # Projection head for training (discarded at inference)
+        # Following SimCLR: encoder features are better for downstream tasks
+        # than projection head features
+        self.projection_head = nn.Sequential(
+            nn.Linear(embedding_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, embedding_dim),
+        )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, use_projection: bool = False) -> torch.Tensor:
         """Forward pass.
 
         Args:
@@ -53,7 +61,12 @@ class PageEmbeddingNet(nn.Module):
         features = self.encoder(x)  # (B, 512, 1, 1)
         features = features.squeeze(-1).squeeze(-1)  # (B, 512)
         embeddings = self.projector(features)  # (B, embedding_dim)
-        return F.normalize(embeddings, dim=1)  # L2-normalize
+        embeddings = F.normalize(embeddings, dim=1)  # L2-normalize
+        
+        if use_projection:
+            projected = self.projection_head(embeddings)
+            return F.normalize(projected, dim=1)
+        return embeddings
 
 
 class SupConLoss(nn.Module):

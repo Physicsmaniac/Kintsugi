@@ -4,10 +4,10 @@ Converts the n×n score matrix into a cost matrix and solves the ATSP to
 recover the optimal left-to-right ordering of strips within a single page.
 
 Strategy:
-    1. ``C[i,j] = 1 − score[i,j]``  (lower cost ⇒ strip j more likely right of i)
+    1. ``C[i,j] = -log(prob[i,j])`` (lower cost ⇒ strip j more likely right of i)
     2. Append a dummy node *d* with ``C[d,j] = C[i,d] = 0`` to convert the
        open Hamiltonian-path problem into a closed TSP tour.
-    3. Solve ATSP via simulated annealing (``python-tsp``).
+    3. Solve ATSP via exact solver (DP) or simulated annealing (``python-tsp``).
     4. Remove the dummy node and read off the path order.
 """
 
@@ -39,6 +39,7 @@ def build_cost_matrix(
     scores: np.ndarray,
     temperature: float = 0.5,
     use_logits: bool = False,
+    use_log_cost: bool = True,
 ) -> np.ndarray:
     """Convert a score/logit matrix to a cost matrix for the ATSP.
 
@@ -53,11 +54,13 @@ def build_cost_matrix(
     use_logits : bool
         If ``True``, apply ``sigmoid(logit / temperature)`` to obtain
         probabilities first.
+    use_log_cost : bool
+        If ``True``, cost is -log(prob + eps). If ``False``, cost is 1 - prob.
 
     Returns
     -------
     cost_matrix : np.ndarray
-        n×n cost matrix where ``cost[i,j] = 1 − prob[i,j]``.
+        n×n cost matrix.
     """
     if use_logits:
         # Temperature-scaled sigmoid
@@ -66,9 +69,12 @@ def build_cost_matrix(
     else:
         probs = np.asarray(scores, dtype=np.float64)
 
-    eps = 1e-6
-    probs = np.clip(probs, eps, 1.0 - eps)
-    costs = -np.log(probs)
+    if use_log_cost:
+        eps = 1e-6
+        costs = -np.log(np.clip(probs, eps, 1.0))
+    else:
+        costs = 1.0 - probs
+
     # Zero out diagonal (self-adjacency is meaningless)
     np.fill_diagonal(costs, 0.0)
     return costs
@@ -131,10 +137,126 @@ def _remove_dummy_from_tour(tour: Sequence[int], n_real: int) -> list[int]:
 # ATSP solver (simulated annealing via python-tsp)
 # ---------------------------------------------------------------------------
 
+def refine_2opt(path: list[int], cost_matrix: np.ndarray, max_iters: int = 100) -> list[int]:
+    """Apply 2-opt local search to improve a Hamiltonian path."""
+    best = list(path)
+    n = len(best)
+    if n < 4:
+        return best
+    
+    def path_cost(seq):
+        return sum(cost_matrix[seq[k], seq[k+1]] for k in range(len(seq) - 1))
+    
+    best_cost = path_cost(best)
+    
+    for _ in range(max_iters):
+        improved = False
+        for i in range(1, n - 1):
+            for j in range(i + 1, n):
+                new_seq = best[:i] + best[i:j+1][::-1] + best[j+1:]
+                new_cost = path_cost(new_seq)
+                if new_cost < best_cost - 1e-10:
+                    best = new_seq
+                    best_cost = new_cost
+                    improved = True
+                    break
+            if improved:
+                break
+        if not improved:
+            break
+    
+    return best
+
+
+def refine_or_opt(path: list[int], cost_matrix: np.ndarray, max_iters: int = 50) -> list[int]:
+    """Or-opt local search: try moving segments of 1, 2, or 3 consecutive nodes."""
+    best = list(path)
+    n = len(best)
+    if n < 4:
+        return best
+    
+    def path_cost(seq):
+        return sum(cost_matrix[seq[k], seq[k+1]] for k in range(len(seq) - 1))
+    
+    best_cost = path_cost(best)
+    
+    for _ in range(max_iters):
+        improved = False
+        for seg_len in [1, 2, 3]:
+            if improved:
+                break
+            for i in range(n - seg_len):
+                if improved:
+                    break
+                segment = best[i:i+seg_len]
+                remainder = best[:i] + best[i+seg_len:]
+                for j in range(len(remainder) + 1):
+                    new_seq = remainder[:j] + segment + remainder[j:]
+                    if new_seq == best:
+                        continue
+                    new_cost = path_cost(new_seq)
+                    if new_cost < best_cost - 1e-10:
+                        best = new_seq
+                        best_cost = new_cost
+                        improved = True
+                        break
+        if not improved:
+            break
+    
+    return best
+
+
+def solve_held_karp(cost_matrix: np.ndarray) -> list[int]:
+    n = cost_matrix.shape[0]
+    INF = float('inf')
+    
+    # dp[mask][u] = min cost to visit exactly the nodes in mask, ending at u
+    dp = np.full((1 << n, n), INF)
+    parent = np.full((1 << n, n), -1, dtype=int)
+    
+    # Base: start at each node
+    for s in range(n):
+        dp[1 << s][s] = 0.0
+    
+    for mask in range(1, 1 << n):
+        for u in range(n):
+            if not (mask & (1 << u)):
+                continue
+            if dp[mask][u] == INF:
+                continue
+            for v in range(n):
+                if mask & (1 << v):
+                    continue
+                new_mask = mask | (1 << v)
+                new_cost = dp[mask][u] + cost_matrix[u][v]
+                if new_cost < dp[new_mask][v]:
+                    dp[new_mask][v] = new_cost
+                    parent[new_mask][v] = u
+    
+    # Find best endpoint
+    full_mask = (1 << n) - 1
+    best_end = int(np.argmin(dp[full_mask]))
+    best_cost = dp[full_mask][best_end]
+    
+    # Reconstruct path
+    path = []
+    mask = full_mask
+    u = best_end
+    while u != -1:
+        path.append(u)
+        prev = parent[mask][u]
+        mask ^= (1 << u)
+        u = prev
+    path.reverse()
+    
+    return path
+
+
 def solve_atsp(
     score_matrix: np.ndarray,
     temperature: float = 0.5,
     use_logits: bool = False,
+    use_log_cost: bool = True,
 ) -> list[int]:
     """Solve the strip ordering as an Asymmetric TSP.
 
@@ -146,6 +268,8 @@ def solve_atsp(
         Temperature for logit-to-probability conversion.
     use_logits : bool
         Whether ``score_matrix`` contains raw logits.
+    use_log_cost : bool
+        If ``True``, cost is -log(prob + eps). If ``False``, cost is 1 - prob.
 
     Returns
     -------
@@ -155,14 +279,8 @@ def solve_atsp(
     Raises
     ------
     ImportError
-        If ``python-tsp`` is not installed.
+        If ``python-tsp`` is not installed and fallback is needed.
     """
-    if not _PYTHON_TSP_AVAILABLE:
-        raise ImportError(
-            "python-tsp is required for the ATSP solver.  "
-            "Install it with:  pip install python-tsp"
-        )
-
     n = score_matrix.shape[0]
     if n <= 1:
         return list(range(n))
@@ -170,17 +288,41 @@ def solve_atsp(
     # For very small instances, exact brute-force is cheap
     if n <= 8:
         logger.info("n=%d ≤ 8 → using exact brute-force solver.", n)
-        return solve_bruteforce(score_matrix, temperature=temperature, use_logits=use_logits)
+        path = solve_bruteforce(score_matrix, temperature=temperature, use_logits=use_logits, use_log_cost=use_log_cost)
+        cost_matrix = build_cost_matrix(score_matrix, temperature=temperature, use_logits=use_logits, use_log_cost=use_log_cost)
+        return refine_2opt(path, cost_matrix)
 
-    cost = build_cost_matrix(score_matrix, temperature=temperature, use_logits=use_logits)
+    cost = build_cost_matrix(score_matrix, temperature=temperature, use_logits=use_logits, use_log_cost=use_log_cost)
+
+    if n <= 20:
+        logger.info("8 < n=%d ≤ 20 → using exact Held-Karp solver.", n)
+        path = solve_held_karp(cost)
+        return refine_2opt(path, cost)
+
+    if not _PYTHON_TSP_AVAILABLE:
+        raise ImportError(
+            "python-tsp is required for the ATSP solver when n > 20.  "
+            "Install it with:  pip install python-tsp"
+        )
+
     augmented = _add_dummy_node(cost)
 
-    logger.info("Solving ATSP via simulated annealing (n=%d + dummy)…", n)
-    tour, total_cost = solve_tsp_simulated_annealing(augmented)
-    logger.info("SA finished.  Total tour cost: %.4f", total_cost)
-
-    path = _remove_dummy_from_tour(tour, n_real=n)
-    logger.info("Recovered path (length=%d): %s", len(path), path)
+    # Multi-restart SA for better solutions
+    best_path = None
+    best_total_cost = float('inf')
+    num_restarts = 4
+    
+    for restart in range(num_restarts):
+        logger.info("SA restart %d/%d (n=%d + dummy)…", restart + 1, num_restarts, n)
+        tour, total_cost = solve_tsp_simulated_annealing(augmented)
+        if total_cost < best_total_cost:
+            best_total_cost = total_cost
+            best_path = _remove_dummy_from_tour(tour, n_real=n)
+    
+    logger.info("Best SA cost across %d restarts: %.4f", num_restarts, best_total_cost)
+    path = best_path
+    path = refine_2opt(path, cost)
+    path = refine_or_opt(path, cost)
     return path
 
 
@@ -192,6 +334,7 @@ def solve_bruteforce(
     score_matrix: np.ndarray,
     temperature: float = 0.5,
     use_logits: bool = False,
+    use_log_cost: bool = True,
 ) -> list[int]:
     """Exact Hamiltonian-path solver via brute-force permutation enumeration.
 
@@ -205,6 +348,8 @@ def solve_bruteforce(
         Temperature for logit conversion (see :func:`build_cost_matrix`).
     use_logits : bool
         Whether ``score_matrix`` contains raw logits.
+    use_log_cost : bool
+        If ``True``, cost is -log(prob + eps). If ``False``, cost is 1 - prob.
 
     Returns
     -------
@@ -215,7 +360,7 @@ def solve_bruteforce(
     if n <= 1:
         return list(range(n))
 
-    cost = build_cost_matrix(score_matrix, temperature=temperature, use_logits=use_logits)
+    cost = build_cost_matrix(score_matrix, temperature=temperature, use_logits=use_logits, use_log_cost=use_log_cost)
 
     best_cost = float("inf")
     best_perm: tuple[int, ...] = tuple(range(n))
@@ -244,6 +389,7 @@ def solve_atsp_with_clusters(
     clusters: dict[int, list[int]],
     temperature: float = 0.5,
     use_logits: bool = False,
+    use_log_cost: bool = True,
 ) -> dict[int, list[int]]:
     """Run the ATSP solver independently within each cluster.
 
@@ -257,6 +403,8 @@ def solve_atsp_with_clusters(
         Temperature for cost conversion.
     use_logits : bool
         Whether ``score_matrix`` contains raw logits.
+    use_log_cost : bool
+        If ``True``, cost is -log(prob + eps). If ``False``, cost is 1 - prob.
 
     Returns
     -------
@@ -279,7 +427,7 @@ def solve_atsp_with_clusters(
 
         # Solve
         local_path = solve_atsp(
-            sub_matrix, temperature=temperature, use_logits=use_logits,
+            sub_matrix, temperature=temperature, use_logits=use_logits, use_log_cost=use_log_cost,
         )
         ordered[label] = [indices[k] for k in local_path]
 

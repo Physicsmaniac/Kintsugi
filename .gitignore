@@ -30,6 +30,7 @@ checkpoints/
 
 # Data directory (raw PDFs, images, shredded outputs)
 /data/
+*.pdf
 person5_test_set/
 shredded_randomized/
 evaluation_results/

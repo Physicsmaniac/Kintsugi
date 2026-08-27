@@ -184,12 +184,23 @@ def _get_container_cpus() -> int:
 
 
 def _train_transforms():
-    """Transforms for training: random crop, white pad, and grayscale jitter."""
+    """Transforms for training: random crop, white pad, color jitter, and grayscale.
+
+    Crop width is 96px (2 × SEAM_EDGE_WIDTH=48), matching the seam pair width.
+    """
     return transforms.Compose(
         [
-            transforms.RandomCrop((224, 64), pad_if_needed=True, fill=255),
-            transforms.Pad((80, 0, 80, 0), fill=255),
+            transforms.RandomCrop((224, 96), pad_if_needed=True, fill=255),
+            transforms.Pad((64, 0, 64, 0), fill=255),  # Center 96px on 224px canvas
+            transforms.RandomApply(
+                [transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2)],
+                p=0.4,
+            ),
             transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply(
+                [transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))],
+                p=0.1,
+            ),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ]
@@ -200,8 +211,8 @@ def _val_transforms():
     """Transforms for validation: center crop and white pad."""
     return transforms.Compose(
         [
-            transforms.CenterCrop((224, 64)),
-            transforms.Pad((80, 0, 80, 0), fill=255),
+            transforms.CenterCrop((224, 96)),
+            transforms.Pad((64, 0, 64, 0), fill=255),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ]
@@ -313,8 +324,16 @@ def train(args: argparse.Namespace) -> None:
 
     # ---- optimiser & scheduler ----------------------------------------
     optimizer = AdamW(model.parameters(), lr=args.lr)
-    criterion = nn.BCEWithLogitsLoss()
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+
+    # Combined loss: 30% BCE for calibrated probabilities + 70% ranking for ATSP
+    from src.training.losses import CombinedSeamLoss
+    criterion = CombinedSeamLoss(bce_weight=0.3, ranking_weight=0.7, temperature=0.1)
+
+    # Warmup + cosine decay: linear warmup for 1 epoch, then cosine anneal
+    from torch.optim.lr_scheduler import SequentialLR, LinearLR
+    warmup_scheduler = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=1)
+    cosine_scheduler = CosineAnnealingLR(optimizer, T_max=max(1, args.epochs - 1), eta_min=1e-6)
+    scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[1])
     scaler = torch.amp.GradScaler("cuda")
 
     # Restore optimizer state if resuming

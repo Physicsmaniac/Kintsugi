@@ -28,18 +28,18 @@ SEAM_MODEL := $(SEAM_DIR)/best_seam_model.pth
 PAGE_MODEL := $(EMBEDDER_DIR)/best_page_embedder.pth
 
 # Training defaults (override on command line: make train-seam EPOCHS=20)
-EPOCHS ?= 10
-BATCH_SIZE ?= 256
+EPOCHS ?= 20
+BATCH_SIZE ?= 512
 LR ?= 1e-4
-STEPS_PER_EPOCH ?= 3000
+STEPS_PER_EPOCH ?= 5000
 VAL_STEPS ?= 400
 NUM_WORKERS ?= 0
 
 # Embedder training defaults
-EMB_EPOCHS ?= 15
-EMB_PAGES_PER_BATCH ?= 8
-EMB_STRIPS_PER_PAGE ?= 4
-EMB_STEPS_PER_EPOCH ?= 1000
+EMB_EPOCHS ?= 30
+EMB_PAGES_PER_BATCH ?= 16
+EMB_STRIPS_PER_PAGE ?= 6
+EMB_STEPS_PER_EPOCH ?= 2000
 
 # Dataset defaults
 LOCAL ?= 0
@@ -49,7 +49,7 @@ LOCAL_FLAG = $(if $(filter 1,$(LOCAL)),--local,)
 PDF ?= $(DATA_DIR)/206-10001-10017.pdf
 NUM_PAGES ?= 2 5 10
 NUM_STRIPS ?= 10
-STRATEGIES ?= greedy atsp hdbscan+greedy hdbscan+atsp
+STRATEGIES ?= kruskal atsp spectral+kruskal spectral+atsp spectral+greedy hdbscan+greedy hdbscan+atsp
 GREEDY_THRESHOLDS ?= 0.25 0.50 0.75
 
 # =============================================================================

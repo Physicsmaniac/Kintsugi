@@ -24,7 +24,12 @@ class SeamResNet(nn.Module):
     the right strip is the true right neighbor of the left strip.
 
     Architecture:
-        ResNet18 backbone → FC(512→256) → ReLU → Dropout(0.3) → FC(256→1)
+        ResNet18 backbone → FC(512→256) → BN → ReLU → Dropout(0.3)
+                           → FC(256→128) → BN → ReLU → Dropout(0.2)
+                           → FC(128→1)
+
+    The deeper head provides more representational capacity for
+    ranking-aware scoring needed by the ATSP solver.
     """
 
     def __init__(self, pretrained: bool = False) -> None:
@@ -33,9 +38,14 @@ class SeamResNet(nn.Module):
         self.cnn = models.resnet18(weights=weights)
         self.cnn.fc = nn.Sequential(
             nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(256, 1),
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 1),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
