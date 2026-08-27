@@ -281,8 +281,38 @@ def main() -> None:
             effective_cpus = min(effective_cpus, len(os.sched_getaffinity(0)))
         except (AttributeError, OSError):
             pass
-        num_workers = max(1, effective_cpus - 2)
-        logger.info("🧠 Effective CPUs: %d → using %d workers", effective_cpus, num_workers)
+        cpu_limit = max(1, effective_cpus - 2)
+        
+        # Read exact container RAM limit via cgroup
+        container_ram_mb = 8192  # Fallback to 8GB
+        try:
+            with open("/sys/fs/cgroup/memory.max") as f:
+                val = f.read().strip()
+                if val != "max":
+                    container_ram_mb = int(val) // (1024 * 1024)
+        except OSError:
+            try:
+                with open("/sys/fs/cgroup/memory/memory.limit_in_bytes") as f:
+                    val = f.read().strip()
+                    if val != "9223372036854771712":
+                        container_ram_mb = int(val) // (1024 * 1024)
+            except OSError:
+                try:
+                    with open("/proc/meminfo") as f:
+                        for line in f:
+                            if line.startswith("MemTotal:"):
+                                container_ram_mb = int(line.split()[1]) // 1024
+                                break
+                except OSError:
+                    pass
+                    
+        # Reserve 4 GB for OS/GPU/main process, rest is for workers
+        usable_mb = max(0, container_ram_mb - 4096)
+        ram_limit = max(1, usable_mb // 500)
+        
+        num_workers = min(cpu_limit, ram_limit)
+        logger.info("🧠 Auto-scaled workers: effective_cpus=%d, container_ram=%dMB → allowed by CPU:%d, by RAM:%d → using %d", 
+                    effective_cpus, container_ram_mb, cpu_limit, ram_limit, num_workers)
 
     train_dataset = MultiPageStripDataset(
         split="train", 
@@ -302,7 +332,7 @@ def main() -> None:
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=num_workers > 0,
-        prefetch_factor=8 if num_workers > 0 else None,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
     val_loader = DataLoader(
         val_dataset, batch_size=batch_size,

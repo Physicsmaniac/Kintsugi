@@ -274,27 +274,43 @@ def train(args: argparse.Namespace) -> None:
         effective_cpus = _get_container_cpus()
         cpu_limit = max(1, effective_cpus - 2)
 
-        # Estimate available RAM by reading /proc/meminfo (Linux)
-        ram_limit = cpu_limit  # fallback: no RAM constraint
+        # Read exact container RAM limit via cgroup
+        container_ram_mb = 8192  # Fallback to 8GB
         try:
-            with open("/proc/meminfo") as f:
-                for line in f:
-                    if line.startswith("MemAvailable:"):
-                        avail_mb = int(line.split()[1]) // 1024  # kB -> MB
-                        # Reserve 4 GB for OS/GPU/model/page-cache, rest for workers.
-                        # Each worker costs ~500 MB (buffer + PIL decode + prefetch).
-                        usable_mb = max(0, avail_mb - 4096)
-                        ram_limit = max(1, usable_mb // 500)
-                        break
+            # cgroup v2
+            with open("/sys/fs/cgroup/memory.max") as f:
+                val = f.read().strip()
+                if val != "max":
+                    container_ram_mb = int(val) // (1024 * 1024)
         except OSError:
-            pass  # Not Linux or no /proc — just use cpu_limit
+            try:
+                # cgroup v1
+                with open("/sys/fs/cgroup/memory/memory.limit_in_bytes") as f:
+                    val = f.read().strip()
+                    if val != "9223372036854771712":  # cgroup v1 "unlimited" value
+                        container_ram_mb = int(val) // (1024 * 1024)
+            except OSError:
+                # Fallback to host MemTotal if cgroup limits don't exist
+                try:
+                    with open("/proc/meminfo") as f:
+                        for line in f:
+                            if line.startswith("MemTotal:"):
+                                container_ram_mb = int(line.split()[1]) // 1024
+                                break
+                except OSError:
+                    pass
+        
+        # Reserve 4 GB for OS/GPU/main process, rest is for workers
+        usable_mb = max(0, container_ram_mb - 4096)
+        # Each worker costs ~500 MB (buffer + PIL decode + prefetch=2)
+        ram_limit = max(1, usable_mb // 500)
 
         actual_num_workers = min(cpu_limit, ram_limit)
-        logger.info("🧠 Auto-scaled workers: effective_cpus=%d, cpu_limit=%d, ram_limit=%d → using %d",
-                    effective_cpus, cpu_limit, ram_limit, actual_num_workers)
+        logger.info("🧠 Auto-scaled workers: effective_cpus=%d, container_ram=%dMB → allowed by CPU:%d, by RAM:%d → using %d",
+                    effective_cpus, container_ram_mb, cpu_limit, ram_limit, actual_num_workers)
 
     # Validation uses fewer workers to avoid OOM when both loaders overlap
-    val_num_workers = min(4, actual_num_workers) if actual_num_workers > 0 else 0
+    val_num_workers = min(2, actual_num_workers) if actual_num_workers > 0 else 0
 
     # Fixed buffer per worker. 100 images × ~2 MB × N workers stays reasonable
     # while giving cross-document negatives enough diversity.
@@ -317,7 +333,7 @@ def train(args: argparse.Namespace) -> None:
         num_workers=actual_num_workers,
         pin_memory=True,
         persistent_workers=actual_num_workers > 0,
-        prefetch_factor=8 if actual_num_workers > 0 else None,
+        prefetch_factor=2 if actual_num_workers > 0 else None,
     )
     # Val DataLoader created lazily per epoch to avoid 2x worker memory overhead
     val_loader = None
