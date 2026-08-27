@@ -99,7 +99,7 @@ def run_experiment(
 
     # Compute score matrix efficiently using the batched version
     from src.solver.scoring import compute_score_matrix_batched
-    score_matrix, _ = compute_score_matrix_batched(seam_model, device, images, batch_size=64, num_workers=0)
+    score_matrix, _ = compute_score_matrix_batched(seam_model, device, images, batch_size=64, num_workers=4)
 
     pred_pages = []
     pred_page_labels = np.full(len(images), -1, dtype=int)
